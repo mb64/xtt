@@ -53,21 +53,21 @@ module Core = struct
               ; cap: tm }
     | Abort
     (* Pi types *)
-    | Pi of ty * ty binds_one
-    | Lam of tm binds_one
+    | Pi of name * ty * ty binds_one
+    | Lam of name * tm binds_one
     | App of tm * tm
     (* Sigma types *)
-    | Sigma of ty * ty binds_one
+    | Sigma of name * ty * ty binds_one
     | Pair of tm * tm
     | Fst of tm | Snd of tm
     (* Paths *)
     | PathTy of ty * tm * tm
-    | PathTm of tm binds_a_dim
-    | AppDim of tm * dim
+    | DimAbs of name * tm binds_a_dim
+    | DimApp of tm * dim
     (* Universes *)
     | U of int
     | GlueType of { b: ty; t_e: tm partial }
-    | GlueTerm of tm partial
+    | GlueTerm of { a: tm partial; b: tm }
     (* TODO: how much type info is needed here exactly?
        I think only the function from the equivalence is needed
        But IDK it might be convenient to just throw the whole [α ↦ T,e] in *)
@@ -78,7 +78,7 @@ end
 module Domain = struct
   type lvl = int
 
-  type dim = DZero | DDimVar of lvl | DOne
+  type dim = Zero | DimVar of lvl | One
   type eqn = dim * dim
   type 'a partial = (dim * dim * 'a) list
 
@@ -104,7 +104,7 @@ module Domain = struct
   and dne =
     (* Basics *)
     | DVar of lvl
-    | DComp of { ty: dne; TODO }
+    (* | DComp of { ty: dne; TODO } *)
     (* Pi *)
     | DApp of dne * dl
     (* Sigma *)
@@ -115,59 +115,53 @@ module Domain = struct
     (* Universes *)
     | DUnglue of dne (* TODO: how much more info is needed? *)
 
-  let abort: dl = lazy (failwith "unreachable: abort")
-
   type env_item = EVal of dl | EDim of dim
   type env = env_item list
 
-  let app : dl -> dl -> d
-  let fst : dl -> d
-  let snd : dl -> d
-  let dim_app : dl -> dim -> d
-  let glue_type : dl partial -> dl -> d
-  let glue_term : dl partial -> dl -> d
-  let unglue : dl -> d
 end
-
-module Ctx : sig
+module Eval : sig
   open Domain
 
-  exception NotInScope of name
+  (* Push computations inside Depends *)
+  val force : dl -> (d -> d) -> d
+  val (let*) : dl -> (d -> d) -> d
 
-  type 'ctx split_on_eqn_result =
-    | Yes of 'ctx
-    | No of 'ctx
-    | Either of { yes: 'ctx; no: 'ctx }
+  val app : dl -> dl -> d
+  val fst : dl -> d
+  val snd : dl -> d
+  val dim_app : dl -> dim -> d
+  val glue_type : dl -> dl partial -> d
+  val glue_term : dl partial -> dl -> d
 
-  class type conv_ctx = (* Smaller context used in conversion checking *)
-    object
-      method lvl : lvl
-      method env : env
-      method names : name list
-      method with_var : name -> dl * conv_ctx
-      method with_dim_var : name -> dim * conv_ctx
-      method with_eqn : eqn -> conv_ctx option
-      method split_on_eqn : eqn -> conv_ctx split_on_eqn_result
-    end
+  (* TODO: figure this out *)
+  (* Should it take the whole equivalence as an arg? Just the function? *)
+  (* val unglue : dl -> d *)
 
-  class type elab_ctx = (* Main context used in elaboration *)
-    object
-      method lvl : lvl
-      method env : env
-      method conv_ctx : conv_ctx
-      method lookup_var : name -> dl * dl
-      method lookup_dim : name -> dim
-      method with_var  : name -> dl -> dl * elab_ctx
-      method with_defn : name -> dl -> dl -> elab_ctx
-      method with_dim_var : name -> dim * elab_ctx
-      method with_eqn : eqn -> elab_ctx option
-    end
+  val reify : dl -> dne -> d
 
-  val initial_ctx : elab_ctx
+  val eval : env -> Core.tm -> d
 end = struct
   open Domain
 
-  exception NotInScope of name
+  (* Push computations inside Depends *)
+  let rec force x f = match Lazy.force x with
+    | Depends { eqn; yes; no } ->
+        Depends { eqn; yes = lazy (force yes f); no = lazy (force no f) }
+    | x -> f x
+  let (let*) = force
+
+  let app f x =
+    let* DLam(_, fn) = f in fn x
+  let fst x =
+    let* DPair(a, _) = x in Lazy.force a
+  let snd x =
+    let* DPair(_, b) = x in Lazy.force b
+  let dim_app p d =
+    let* DDimAbs(_, fn) = p in fn d
+  let glue_type b t_e =
+    failwith "TODO"
+  let glue_term a b = failwith "TODO"
+  let unglue x = failwith "TODO"
 
   (* Type-directed reification *)
   let rec reify (ty: dl) (tm: dne) = match Lazy.force ty with
@@ -178,10 +172,10 @@ end = struct
     | DNe _ -> DNe tm
     | DPi(name, a, b) ->
         let name = if name = "_" then "x" else name in
-        DLam(name, fun x -> reify (apply ty x) (DNe (DApp(tm, x))))
+        DLam(name, fun x -> reify (lazy (app ty x)) (DApp(tm, x)))
     | DSigma(name, a, b) ->
         let fst = lazy (reify a (DFst tm)) in
-        DPair(fst, lazy (reify (b fst) (DSnd tm)))
+        DPair(fst, lazy (reify (lazy (b fst)) (DSnd tm)))
     | DPathTy(a, lhs, rhs) ->
         DDimAbs("i", fun dim ->
           Depends
@@ -190,7 +184,7 @@ end = struct
             ; no  = lazy (Depends
                 { eqn = dim, One
                 ; yes = rhs
-                ; no  = lazy (reify a (DDimApp(tm, dim))) }) }
+                ; no  = lazy (reify a (DDimApp(tm, dim))) }) })
     | DU _ -> DNe tm
     | DGlueType { b; t_e } ->
         (* when ty = Glue b [α ↦ t], then tm should be
@@ -207,37 +201,226 @@ end = struct
            Depends(β, reify t₂ tm, lazy (failwith "unreachable: not a type"))
         *)
         failwith "TODO"
-    | DLam _ | DPair _ | DPathTm _ | DGlueTerm _  ->
+    | DLam _ | DPair _ | DDimAbs _ ->
         failwith "unreachable: not a type"
+
+  let rec eval (env : env) (tm : Core.tm) = match tm with
+    (* Basics *)
+    | Var idx -> begin match List.nth env idx with
+        | EVal v -> Lazy.force v
+        | _ -> failwith "unreachable: internal scoping error"
+      end
+    | Let(x, body) ->
+        eval (EVal (lazy (eval env x))::env) body
+    | Comp { ty; s; t; partial; cap } ->
+        let ty = eval env ty in
+        let s, t = eval_dim env s, eval_dim env t in
+        let partial = eval_partial env partial in
+        let cap = lazy (eval env cap) in
+        comp ty s t partial cap
+    | Abort ->
+        failwith "unreachable: abort"
+
+    (* Pi types *)
+    | Pi(n, a, b) ->
+        DPi(n, lazy (eval env a), fun x -> eval (EVal x::env) b)
+    | Lam(n, body) ->
+        DLam(n, fun x -> eval (EVal x::env) body)
+    | App(f, x) ->
+        let f, x = lazy (eval env f), lazy (eval env x) in
+        app f x
+
+    (* Sigma types *)
+    | Sigma(n, a, b) ->
+        DSigma(n, lazy (eval env a), fun x -> eval (EVal x::env) b)
+    | Pair(x, y) ->
+        DPair(lazy (eval env x), lazy (eval env y))
+    | Fst x ->
+        fst (lazy (eval env x))
+    | Snd x ->
+        snd (lazy (eval env x))
+
+    (* Paths *)
+    | PathTy(a, lhs, rhs) ->
+        DPathTy(lazy (eval env a), lazy (eval env lhs), lazy (eval env rhs))
+    | DimAbs(n, tm) ->
+        (* No need to handle cube rules here; it's handled in reify *)
+        DDimAbs(n, fun d -> eval (EDim d::env) tm)
+    | DimApp(p, d) ->
+        dim_app (lazy (eval env p)) (eval_dim env d)
+
+    (* Universes *)
+    | U i -> DU i
+    | GlueType { b; t_e } ->
+        let b = lazy (eval env b) in
+        let t_e = eval_partial env t_e in
+        glue_type b t_e
+    | GlueTerm { a; b } ->
+        let a = eval_partial env a in
+        let b = lazy (eval env b) in
+        glue_term a b
+    | Unglue { equiv_fun; x } ->
+        let equiv_fun = eval_partial env equiv_fun in
+        let x = lazy (eval env x) in
+        failwith "TODO"
+
+  and eval_dim env (d : Core.dim) = match d with
+    | Zero -> Zero
+    | One  -> One
+    | DimVar idx -> match List.nth env idx with
+        | EDim d -> d
+        | _ -> failwith "unreachable: internal scoping error"
+
+  and eval_partial env (partial : Core.tm Core.partial) =
+    List.map (fun (i, j, tm) ->
+      eval_dim env i, eval_dim env j, lazy (eval env tm)) partial
+
+  and comp ty s t partial cap =
+    (* match on ty *)
+    failwith "TODO"
+end
+
+module Ctx : sig
+  open Domain
+
+  exception NotInScope of name
+
+  (* don't particularly like it but it's eh *)
+  type 'ctx split_on_eqn_result =
+    | Yes of 'ctx
+    | No of 'ctx
+    | Either of { yes: 'ctx; no: 'ctx }
+
+  class type ctx =
+    object
+      method lvl : lvl
+      method env : env
+      method names : name list
+      method lookup_var : name -> dl * dl
+      method lookup_dim : name -> dim
+      method with_var  : name -> dl -> dl * ctx
+      method with_defn : name -> dl -> dl -> ctx
+      method with_dim_var : name -> dim * ctx
+      method with_eqn : eqn -> ctx option
+      method split_on_eqn : eqn -> ctx split_on_eqn_result
+      method entails : eqn -> bool
+      method are_cofibs_equal : eqn list -> eqn list -> bool
+    end
+
+  val initial_ctx : ctx
+end = struct
+  open Domain
+
+  exception NotInScope of name
 
   module IntMap = Map.Make (Int)
   type formula = int IntMap.t
 
-  let idx_of_dim = function Zero -> 0 | One -> 1 | DimVar x -> 2 + x
+  let find dim formula =
+    let rec go i =
+      let p = IntMap.find i formula in
+      if p = i then i else go p in
+    go (match dim with Zero -> 0 | One -> 1 | DimVar x -> 2 + x)
+  let union d1 d2 formula =
+    let a, b = find d1 formula, find d2 formula in
+    IntMap.add (min a b) (max a b) formula
+  let is_inconsistent formula diseq =
+    List.exists (fun (a, b) -> find a formula = find b formula) diseq
 
-  class conv_ctx lvl env names formula diseq =
-    object
+  type 'ctx split_on_eqn_result =
+    | Yes of 'ctx
+    | No of 'ctx
+    | Either of { yes: 'ctx; no: 'ctx }
+
+  class ctx lvl names tys env formula diseq =
+    object (self)
       method lvl : lvl = lvl
       method env : env = env
       method names : name list = names
-      method with_var name =
-        let var = reify 
-        let ctx' = new conv_ctx (lvl+1) (name::names) formula diseq in
+
+      method lookup_var name =
+        let rec go ns ts es = match ns, ts, es with
+          | n::_, Some t::_, EVal e::_ when n = name -> t, e
+          | _::ns, _::ts, _::es -> go ns ts es
+          | [], [], [] -> raise (NotInScope name)
+          | _ -> failwith "unreachable" in
+        go names tys env
+      method lookup_dim name =
+        let rec go ns es = match ns, es with
+          | n::_, EDim e::_ when n = name -> e
+          | [], [] -> raise (NotInScope name)
+          | _ -> failwith "unreachable" in
+        go names env
+
+      method with_defn name ty x =
+        let ctx' = new ctx (lvl+1)
+          (name::names) (Some ty::tys) (EVal x::env)
+          formula diseq in
+        ctx'
+      method with_var name ty =
+        let x = lazy (Eval.reify ty (DVar lvl)) in
+        x, self#with_defn name ty x
+      method with_dim_var name =
+        let x = DimVar lvl in
+        let ctx' = new ctx (lvl+1)
+          (name::names) (None::tys) (EDim x::env)
+          formula diseq in
+        x, ctx'
+
+      method with_eqn (x, y) =
+        let formula' = union x y formula in
+        if is_inconsistent formula diseq then
+          None
+        else
+          Some (new ctx lvl names tys env formula' diseq)
+      method split_on_eqn (x, y) =
+        if find x formula = find y formula then
+          Yes (self :> ctx)
+        else
+          let formula' = union x y formula in
+          if is_inconsistent formula' diseq then
+            No (self :> ctx)
+          else
+            Either { yes = new ctx lvl names tys env formula' diseq
+                   ; no  = new ctx lvl names tys env formula ((x,y)::diseq) }
+
+      method entails (x, y) =
+        find x formula = find y formula
+
+      method are_cofibs_equal xs ys =
+        let implies a b =
+          List.for_all (fun (x, y) ->
+            is_inconsistent (union x y formula) b) a in
+        implies xs ys && implies ys xs
+    end
+
+  let initial_ctx =
+    new ctx 0 [] [] [] IntMap.(add 0 0 (singleton 1 1)) [Zero, One]
+end
+
+module Pretty : sig
+  open Domain
+
+  val show : Ctx.ctx -> dl -> dl -> string
+end = struct
+  (* TODO: pretty-printing *)
+end
+
+module Conv : sig
+  open Domain
+
+  val eq : Ctx.ctx -> dl -> dl -> dl -> bool
+end = struct
+  open Domain
+
+  exception NotEqual
+
+  let rec conv (ctx : Ctx.ctx) (ty : dl) (a : dl) (b : dl) =
+    failwith "TODO"
 
 
+  
 
-
-
-
-  (* TODO: a ctx class *)
-  (* It should have as methods:
-     lookup_dim
-     lookup_var
-     with_dim_var
-     with_eqn
-     with_var
-     with_defn
-   *)
 end
 
 module Tychk = struct
@@ -339,7 +522,7 @@ Need to check: can every cube rule be handled in this way?
 (Can every new η rule be handled in this way too?)
 
 Where the Cube Rules run (note: perfectly safe for β rules to take precedence):
-  - kan composition: in eval for comp at a neutral type
+  - Kan composition: in eval for comp at a neutral type
   - paths: in reification at path type
   - Glue type: in eval for Glue
   - glue term: in eval for glue
