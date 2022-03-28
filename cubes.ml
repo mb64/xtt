@@ -30,9 +30,8 @@ module AST = struct
     | GlueType of { b: ty; t_e: partial }
     | GlueTerm of { a: partial; b: exp }
     | Unglue of { b: ty; t_e: partial; x: exp }
-  and partial = (cofib * exp) list
+  and partial = (dim * dim * exp) list
   and dim = Zero | DimVar of name | One
-  and cofib = Eq of dim * dim | Disj of cofib * cofib
 end
 
 module Core = struct
@@ -43,7 +42,6 @@ module Core = struct
   type 'a binds_a_dim = 'a
 
   type dim = Zero | DimVar of idx | One
-  and cofib = (dim * dim) list
   and ty = tm
   and tm =
     (* Basics: x, let x = e₁; e₂, comp z. A [i-j] [ α ↦ e ] b *)
@@ -74,93 +72,21 @@ module Core = struct
        I think only the function from the equivalence is needed
        But IDK it might be convenient to just throw the whole [α ↦ T,e] in *)
     | Unglue of { equiv_fun: tm partial; x: tm }
-  and 'a partial = (cofib * 'a) list
-end
-
-module type CUBE = sig
-  type var  (* Interval variables i, j *)
-  type dim = Zero | Var of var | One (* Dimensions i, j, 0, 1 *)
-  type cofib (* Cofibrations (constraints) α *)
-  type ctx (* The dimension context and formula Ψ ; φ *)
-
-  val nah : cofib (* = (0 = 1) *)
-  val eq : dim -> dim -> cofib
-  val disj : cofib -> cofib -> cofib
-  val forall : (var -> cofib) -> cofib
-
-  exception NotInScope of name
-
-  val empty_ctx : ctx
-  val lookup_var : ctx -> name -> var
-  val with_new_var : ctx -> name -> var * ctx
-  val with_cofib : ctx -> cofib -> ctx
-
-  val entails : ctx -> cofib -> bool
-  val is_borked : ctx -> bool (* = entails (0 = 1) *)
-
-  val are_dims_equal   : ctx -> dim -> dim -> bool
-  val are_cofibs_equal : ctx -> cofib -> cofib -> bool
-end
-
-module Cube : CUBE = struct
-  type var = int
-  type dim = Zero | Var of var | One
-  type cofib = (dim * dim) list (* a disjunction of equations *)
-  type ctx =
-    { next_var: var
-    ; names: name list
-    ; formula: cofib list (* a conjunction of clauses *) }
-
-  let nah: cofib = []
-  let eq a b: cofib = [a, b]
-  let disj = (@)
-  let forall f = failwith "heck how do I implement this. some kinda quantifier elimination?"
-
-  exception NotInScope of name
-
-  let empty_ctx: ctx = { next_var = 0; names = []; formula = [] }
-  let lookup_var (ctx: ctx) name =
-    let rec go v = function
-      | [] -> raise (NotInScope name)
-      | n::_ when n = name -> v
-      | _::rest -> go (v-1) rest in
-    go (ctx.next_var - 1) ctx.names
-  let with_new_var (ctx: ctx) name =
-    ctx.next_var,
-    { ctx with next_var = ctx.next_var + 1; names = name :: ctx.names }
-  let with_cofib (ctx: ctx) cofib =
-    { ctx with formula = cofib :: ctx.formula }
-
-  let entails (ctx: ctx) cofib =
-    (* Check that ctx.formula and not(cofib) is unsat *)
-    let parents = Array.make (ctx.next_var + 2) (-1) in
-    let idx_of_dim = function Zero -> 0 | One -> 1 | Var i -> 2 + i in
-    let rec find i =
-      let p = parents.(i) in
-      if p = -1 then i else let x = find p in parents.(i) <- x; x in
-    let find_dim d = find (idx_of_dim d) in
-    let union_dim (x, y) = parents.(find_dim x) <- find_dim y in
-    let rec is_unsat eqs = function
-      | [] ->
-          Array.fill parents 0 (Array.length parents) (-1);
-          List.iter union_dim eqs;
-          List.exists (fun (x,y) -> find_dim x = find_dim y) ((Zero,One)::cofib)
-      | c::cs -> List.for_all (fun eq -> is_unsat (eq::eqs) cs) c in
-    is_unsat [] ctx.formula
-  let is_borked ctx = entails ctx nah
-
-  let are_dims_equal ctx x y = entails ctx (eq x y)
-  let are_cofibs_equal ctx x y =
-    entails (with_cofib ctx x) y && entails (with_cofib ctx y) x
+  and 'a partial = (dim * dim * 'a) list
 end
 
 module Domain = struct
   type lvl = int
 
+  type dim = DZero | DDimVar of lvl | DOne
+  type eqn = dim * dim
+  type 'a partial = (dim * dim * 'a) list
+
   (* the semantic domain (?) *)
-  type dl = d Lazy.t
+  and dl = d Lazy.t
   and d =
-    (* Basics: neutrals *)
+    (* Basics: neutrals, things that depend on intervals *)
+    | Depends of { eqn: eqn; yes: dl; no: dl }
     | DNe of dne
     (* Pi types *)
     | DPi of name * dl * (dl -> d)
@@ -170,18 +96,11 @@ module Domain = struct
     | DPair of dl * dl
     (* Paths *)
     | DPathTy of dl * dl * dl
-    | DPathTm of { name: name; p: Cube.dim -> d; p_0: dl; p_1: dl }
+    | DDimAbs of name * (dim -> d)
     (* Universes *)
     | DU of int
-    | DGlueType of { b: dl; t_e: d_partial }
-    | DGlueTerm of { a: d_partial; b: d_partial }
-  (* ugh this is not great. it's not stable under cube context extension!
-     how to make it stable under cube context extension?
-     or is it just hopeless?
-     - partial elements are fine (?) are they?
-     - Unglue! It is like a neutral term
-   *)
-  (* neutral terms, i hope *)
+    | DGlueType of { b: dl; t_e: dl partial }
+    | DGlueTerm of { a: dl partial; b: dl }
   and dne =
     (* Basics *)
     | DVar of lvl
@@ -194,12 +113,136 @@ module Domain = struct
     (* Path *)
     | DDimApp of dne * dim
     (* Universes *)
-    | DUnglue of dne
-
-  and d_partial = (Cube.cofib * dl) list
+    | DUnglue of dne (* TODO: how much more info is needed? *)
 
   let abort: dl = lazy (failwith "unreachable: abort")
+
+  type env_item = EVal of dl | EDim of dim
+  type env = env_item list
+
+  let app : dl -> dl -> d
+  let fst : dl -> d
+  let snd : dl -> d
+  let dim_app : dl -> dim -> d
+  let glue_type : dl partial -> dl -> d
+  let glue_term : dl partial -> dl -> d
+  let unglue : dl -> d
 end
+
+module Ctx : sig
+  open Domain
+
+  exception NotInScope of name
+
+  type 'ctx split_on_eqn_result =
+    | Yes of 'ctx
+    | No of 'ctx
+    | Either of { yes: 'ctx; no: 'ctx }
+
+  class type conv_ctx = (* Smaller context used in conversion checking *)
+    object
+      method lvl : lvl
+      method env : env
+      method names : name list
+      method with_var : name -> dl * conv_ctx
+      method with_dim_var : name -> dim * conv_ctx
+      method with_eqn : eqn -> conv_ctx option
+      method split_on_eqn : eqn -> conv_ctx split_on_eqn_result
+    end
+
+  class type elab_ctx = (* Main context used in elaboration *)
+    object
+      method lvl : lvl
+      method env : env
+      method conv_ctx : conv_ctx
+      method lookup_var : name -> dl * dl
+      method lookup_dim : name -> dim
+      method with_var  : name -> dl -> dl * elab_ctx
+      method with_defn : name -> dl -> dl -> elab_ctx
+      method with_dim_var : name -> dim * elab_ctx
+      method with_eqn : eqn -> elab_ctx option
+    end
+
+  val initial_ctx : elab_ctx
+end = struct
+  open Domain
+
+  exception NotInScope of name
+
+  (* Type-directed reification *)
+  let rec reify (ty: dl) (tm: dne) = match Lazy.force ty with
+    | Depends { eqn; yes; no } ->
+        Depends { eqn = eqn
+                ; yes = lazy (reify yes tm)
+                ; no  = lazy (reify no  tm) }
+    | DNe _ -> DNe tm
+    | DPi(name, a, b) ->
+        let name = if name = "_" then "x" else name in
+        DLam(name, fun x -> reify (apply ty x) (DNe (DApp(tm, x))))
+    | DSigma(name, a, b) ->
+        let fst = lazy (reify a (DFst tm)) in
+        DPair(fst, lazy (reify (b fst) (DSnd tm)))
+    | DPathTy(a, lhs, rhs) ->
+        DDimAbs("i", fun dim ->
+          Depends
+            { eqn = dim, Zero
+            ; yes = lhs
+            ; no  = lazy (Depends
+                { eqn = dim, One
+                ; yes = rhs
+                ; no  = lazy (reify a (DDimApp(tm, dim))) }) }
+    | DU _ -> DNe tm
+    | DGlueType { b; t_e } ->
+        (* when ty = Glue b [α ↦ t], then tm should be
+           glue [α ↦ reify t tm] (unglue g)
+           Depends(α, reify (fst t) tm, Glue tm)
+        TODO figure this out.
+        Don't call GlueTerm directly, use the glue helper function (?)
+         *)
+        failwith "TODO"
+    | DGlueTerm _ ->
+        (* ty : Glue [α ↦ ...] ... is only a type when α holds *)
+        (* when ty = glue [α ↦ t₁ | β ↦ t₂] (b), then tm should be
+           Depends(α, reify t₁ tm,
+           Depends(β, reify t₂ tm, lazy (failwith "unreachable: not a type"))
+        *)
+        failwith "TODO"
+    | DLam _ | DPair _ | DPathTm _ | DGlueTerm _  ->
+        failwith "unreachable: not a type"
+
+  module IntMap = Map.Make (Int)
+  type formula = int IntMap.t
+
+  let idx_of_dim = function Zero -> 0 | One -> 1 | DimVar x -> 2 + x
+
+  class conv_ctx lvl env names formula diseq =
+    object
+      method lvl : lvl = lvl
+      method env : env = env
+      method names : name list = names
+      method with_var name =
+        let var = reify 
+        let ctx' = new conv_ctx (lvl+1) (name::names) formula diseq in
+
+
+
+
+
+
+  (* TODO: a ctx class *)
+  (* It should have as methods:
+     lookup_dim
+     lookup_var
+     with_dim_var
+     with_eqn
+     with_var
+     with_defn
+   *)
+end
+
+module Tychk = struct
+  open Core
+  open Domain
 
 (* Aaaaaaaaaaaa a annoying thing:
   Why are disjunctions in trivial cofibrations a thing anyways?
@@ -226,15 +269,92 @@ end
   In particular need to figure out how quantifier elimination works.
 
 
+*)
+
+
+(* Need type-directed conversion checking! Nasty.
+
+new domain design, for cube rules: evaluate into a *decision tree* of values:
+
+  type dl = d Lazy.t
+  and d =
+    | Depends of { eqn: dim * dim; yes: dl; no: dl }
+    | Other Stuff
+
+The evaluator doesn't even get access to the cube context; instead, when it
+wants to know if a cube equation holds, it puts a Depends.
+Applications/projections/other continuations distribute over Depends
+
+Then the ctx gets a method
+
+  type 'ctx split_on_eqn_result =
+    | Yes of 'ctx
+    | No of 'ctx
+    | Either of { yes: 'ctx; no: 'ctx }
+
+  class type ctx =
+    object
+      other stuff
+      method split_on_eqn : eqn -> ctx split_on_eqn_result
+    end
+
+(Does only the conv_ctx get it, or does the elab_ctx need it too?
+I think only the conv_ctx needs it; the elab_ctx instead just gets with_eqn)
+
+ *)
+
+
+
+(* AAaaaaaaaaaaaAAAAAAA how do I make sure arbitrary neutral forms like
+
+    fst(f x) @ i0
+
+evaluate to the right things????
+
+Answer: *use the full reify machinery!*  Type-directed eta-elongation will make
+it work.  Plus as a bonus it handles other eta stuffs
+
+
+
+can't have disequalities in the elab_ctx:
+during elab, take the 'no' branch when it's not necessarily true, but don't
+enforce that it *stays* not true in every context extension
+  - in elab, 'no' means 'not necessarily'
+  - in conv, 'no' can safely be interpreted as 'necessarily not' (?) possibly?
+→ both contexts should possibly use some other simpler context
+→ WHAT ABOUT: how to do conv at a Depends type???
+
+
+Gotta be *veeeeeeeeeeery careful* not to accidentally throw out information:
+  need to be able to take the 'not necessarily' case but also take the 'yes'
+  case some other time in the short future; being in the 'no' case *does not*
+  grant the evaluator permission to assume it *stays* false
+This seems like a reasonable restriction, but it's vague and I should pin down
+exactly what it means: for how long is it allowed to assume it's false?
+
+I wish there were a better way to do this
+
+
+Need to check: can every cube rule be handled in this way?
+(Can every new η rule be handled in this way too?)
+
+Where the Cube Rules run (note: perfectly safe for β rules to take precedence):
+  - kan composition: in eval for comp at a neutral type
+  - paths: in reification at path type
+  - Glue type: in eval for Glue
+  - glue term: in eval for glue
+  - unglue term: in eval for unglue of a neutral term
+
+*)
+
+
+
+(* TODO: add ⊤/⊥ types, tt : ⊤, abort : ∀ A → ⊥ → A *)
+
 
 
 
 module Typechecker = struct
   open Core
-
-
-  (* type ctx = { ctx } *)
-
-  (* val force : d *)
 
 
