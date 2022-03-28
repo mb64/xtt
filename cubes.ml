@@ -23,7 +23,7 @@ module AST = struct
     | Snd of exp
     (* Paths: Path A x y, <i> e, e @ i *)
     | PathTy of ty * exp * exp
-    | DimAbs of name * exp
+    | PathTm of name * exp
     | DimApp of exp * dim
     (* Universes: U_i, Glue B [α ↦ T,e], glue [α ↦ t] b, unglue B [α ↦ T,e] x *)
     | U of int
@@ -155,24 +155,26 @@ module Cube : CUBE = struct
 end
 
 module Domain = struct
+  type lvl = int
+
   (* the semantic domain (?) *)
   type dl = d Lazy.t
   and d =
     (* Basics: neutrals *)
     | DNe of dne
     (* Pi types *)
-    | DPi of dl * (dl -> d)
-    | DLam of (dl -> d)
+    | DPi of name * dl * (dl -> d)
+    | DLam of name * (dl -> d)
     (* Sigma types *)
-    | DSigma of dl * (dl -> d)
+    | DSigma of name * dl * (dl -> d)
     | DPair of dl * dl
     (* Paths *)
     | DPathTy of dl * dl * dl
-    | DPathTm of (Cube.dim -> d)
+    | DPathTm of { name: name; p: Cube.dim -> d; p_0: dl; p_1: dl }
     (* Universes *)
     | DU of int
-    | DGlueType of ...
-    | DGlueTerm of ...
+    | DGlueType of { b: dl; t_e: d_partial }
+    | DGlueTerm of { a: d_partial; b: d_partial }
   (* ugh this is not great. it's not stable under cube context extension!
      how to make it stable under cube context extension?
      or is it just hopeless?
@@ -181,11 +183,51 @@ module Domain = struct
    *)
   (* neutral terms, i hope *)
   and dne =
+    (* Basics *)
     | DVar of lvl
+    | DComp of { ty: dne; TODO }
+    (* Pi *)
     | DApp of dne * dl
+    (* Sigma *)
     | DFst of dne
     | DSnd of dne
-    | DUnglue
+    (* Path *)
+    | DDimApp of dne * dim
+    (* Universes *)
+    | DUnglue of dne
+
+  and d_partial = (Cube.cofib * dl) list
+
+  let abort: dl = lazy (failwith "unreachable: abort")
+end
+
+(* Aaaaaaaaaaaa a annoying thing:
+  Why are disjunctions in trivial cofibrations a thing anyways?
+  What are they for?
+  Why merge partial elements?
+  Like, ok, in some context Ψ;φ;Γ,
+
+  [ (i=0)∨(i=1) ↦   something with p @ i ]
+
+  now there's just like, two completely different values being packed into one
+  is there any time I couldn't just
+    [ (i=0) ↦  something with p @ 0
+    | (i=1) ↦  something with p @ 1 ] ?
+  If not I really wanna straight up do away with all the disjunctions and have a
+  cube formula of ONLY EQUATIONS (the joy!)
+  Other things that would improve from a cube formula of ONLY EQUATIONS:
+    - Maintain it as a union-find datastructure, use the functional Map module
+    - Discover conflicts when they arise; no need to ask for consistency checks
+      on every function
+    - Really efficient cofibration entailment
+
+  For this to work, need to check that none of the Kan operations introduce
+  disjunctions in inconvenient places.
+  In particular need to figure out how quantifier elimination works.
+
+
+
+
 
 module Typechecker = struct
   open Core
