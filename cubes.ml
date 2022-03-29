@@ -1,4 +1,5 @@
 (* ABCFHL cartesian cubical type theory, more or less *)
+
 type name = string
 
 module AST = struct
@@ -102,7 +103,16 @@ module Domain = struct
   and dne =
     (* Basics *)
     | DVar of lvl
-    (* | DComp of { ty: dne; TODO } *)
+    | DComp of { z: name
+               ; s: dim; t: dim
+               (* TODO figure this out *)
+               (* ; ty: dne (1* but it binds a dim? *1) *)
+               (* guaranteed that when you run the ty on a fresh dim it's a
+                  neutral *)
+               (* this means lotsa quoting and unquoting *)
+               ; ty: (dim -> d)
+               ; partial: (dim -> d) partial
+               ; cap: dl }
     (* Pi *)
     | DApp of dne * dl
     (* Sigma *)
@@ -111,7 +121,7 @@ module Domain = struct
     (* Path *)
     | DDimApp of dne * dim
     (* Universes *)
-    | DUnglue of dl partial * dne (* TODO: how much info is needed? *)
+    | DUnglue of dl partial * dne
 
   type env_item = EVal of dl | EDim of dim
   type env = env_item list
