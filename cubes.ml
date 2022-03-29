@@ -1,6 +1,7 @@
 (* ABCFHL cartesian cubical type theory, more or less *)
 
 type name = string
+type lvl = int and idx = int
 
 module AST = struct
   type ty = exp
@@ -37,8 +38,6 @@ module AST = struct
 end
 
 module Core = struct
-  type lvl = int and idx = int
-
   (* Just comments *)
   type 'a binds_one = 'a
   type 'a binds_a_dim = 'a
@@ -75,27 +74,61 @@ module Core = struct
 end
 
 module Domain = struct
-  type lvl = int
+  (*
+  STANDARDLY, in NbE proofs, the model is in PSh(Ren) where Ren is the category
+  of contexts and renaminings, but typecheckers get by with only presheaves over
+  the category of contexts and context extensions: this is super convenient bc
+  using de Bruijn levels, context extension is free.
 
-  type dim = Zero | DimVar of lvl | One
+  HERE, since conv z. A [i-j] [α ↦ t] needs to pattern match on z. A through the
+  dimension binder, we need evaluation under dimension binders, so we can't get
+  by with *only* context extension; we actually need arbitrary dimension
+  renamings. (Luckily we still only need context extension for regular
+  variables.)
+
+  So, annoyingly, we need a buncha extra bookkeeping:
+    type ren = idx -> idx  (* a renaming of the dimension context *)
+    val ren : ren -> d -> d
+    val ren_ne : ren -> dne -> dne
+  and all the functions need to use the Kripke function space, ren -> 'a -> 'b
+  *)
+
+  type ren = idx -> idx (* a renaming of the dimension context *)
+
+  type dim = Zero | DimVar of idx | One
   type eqn = dim * dim
   type 'a partial = (dim * dim * 'a) list
 
+  (* an annotation for documentation purposes *)
+  type 'a binds_a_dim = 'a
+
+  module Ren : sig
+    type ren
+    val compose : ren -> ren -> ren
+    val extend_ren : ren -> ren
+    val ren_dim : ren -> dim -> dim
+  end = struct
+    type ren = idx -> idx
+    let compose r' r x = r' (r x)
+    let extend_rem r i = if i = 0 then 0 else 1 + r (i - 1)
+    (* TODO *)
+  end
+
   (* the semantic domain (?) *)
-  and dl = d Lazy.t
+  type dl = d Lazy.t
   and d =
     (* Basics: neutrals, things that depend on intervals *)
     | Depends of { eqn: eqn; yes: dl; no: dl }
     | DNe of dne
     (* Pi types *)
-    | DPi of name * dl * (dl -> d)
-    | DLam of name * (dl -> d)
+    | DPi of name * dl * (ren -> dl -> d)
+    | DLam of name * (ren -> dl -> d)
     (* Sigma types *)
-    | DSigma of name * dl * (dl -> d)
+    | DSigma of name * dl * (ren -> dl -> d)
     | DPair of dl * dl
     (* Paths *)
     | DPathTy of dl * dl * dl
-    | DDimAbs of name * (dim -> d)
+    | DDimAbs of name * dl binds_a_dim
     (* Universes *)
     | DU of int
     | DGlueType of { b: dl; t_e: dl partial }
@@ -105,13 +138,8 @@ module Domain = struct
     | DVar of lvl
     | DComp of { z: name
                ; s: dim; t: dim
-               (* TODO figure this out *)
-               (* ; ty: dne (1* but it binds a dim? *1) *)
-               (* guaranteed that when you run the ty on a fresh dim it's a
-                  neutral *)
-               (* this means lotsa quoting and unquoting *)
-               ; ty: (dim -> d)
-               ; partial: (dim -> d) partial
+               ; ty: dne binds_a_dim
+               ; partial: dl binds_a_dim partial
                ; cap: dl }
     (* Pi *)
     | DApp of dne * dl
@@ -126,7 +154,82 @@ module Domain = struct
   type env_item = EVal of dl | EDim of dim
   type env = env_item list
 
+  let compose f g x = f (g x)
+
+  (* Renaming functions witness that d is in fact a presheaf on the category of
+     contexts and renamings
+
+     CHECK: ren id = id
+            ren f ∘ ren g = ren (f ∘ g)
+   *)
+
+  let rec ren_dim (r : ren) = function
+    | Zero -> Zero
+    | One  -> One
+    | DimVar i -> DimVar (r i)
+
+  and ren (r : ren) (tm : dl): d = match Lazy.force tm with
+    | Depends { eqn = i, j; yes; no } ->
+        Depends { eqn = ren_dim r i, ren_dim r j
+                ; yes = lazy (ren r yes)
+                ; no  = lazy (ren r no) }
+    | DNe ne ->
+        DNe (ren_ne r ne)
+    | DPi(name, a, b) ->
+        DPi(name, lazy (ren r a), fun s x -> b (compose s r) x)
+    | DLam(name, f) ->
+        DLam(name, fun s x -> f (compose s r) x)
+    | DSigma(name, a, b) ->
+        DSigma(name, lazy (ren r a), fun s x -> b (compose s r) x)
+    | DPair(a, b) ->
+        DPair(lazy (ren r a), lazy (ren r b))
+    | DPathTy(a, lhs, rhs) ->
+        DPathTy(lazy (ren r a), lazy (ren r lhs), lazy (ren r rhs))
+    | DDimAbs(name, p) ->
+        (* r' is r but in an extended context *)
+        let r' i = if i = 0 then 0 else 1 + r (i - 1) in
+        DDimAbs(name, lazy (ren r' p))
+    | DU i ->
+        DU i
+    | DGlueType { b; t_e } ->
+        let b = lazy (ren r b) in
+        let t_e = List.map (fun (i, j, t) ->
+          (ren_dim r i, ren_dim r j, lazy (ren r t))) t_e in
+        DGlueType { b; t_e }
+    | DGlueTerm { a; b } ->
+        let a = List.map (fun (i, j, t) ->
+          (ren_dim r i, ren_dim r j, lazy (ren r t))) a in
+        let b = lazy (ren r b) in
+        DGlueTerm { a; b }
+
+  and ren_ne r = function
+    | DVar l -> DVar l
+    | DComp { z; s; t; ty; partial; cap } ->
+        (* r' is r but in an extended context *)
+        let r' i = if i = 0 then 0 else 1 + r (i - 1) in
+        let ren_partial_elem (i, j, t) =
+          (ren_dim r i, ren_dim r j, lazy (ren r' t)) in
+        DComp { z = z
+              ; s = ren_dim r s; t = ren_dim r t
+              ; ty = ren_ne r' ty
+              ; partial = List.map ren_partial_elem partial
+              ; cap = lazy (ren r cap) }
+    | DApp(f, x) ->
+        DApp(ren_ne r f, lazy (ren r x))
+    | DFst x ->
+        DFst (ren_ne r x)
+    | DSnd x ->
+        DSnd (ren_ne r x)
+    | DDimApp(p, d) ->
+        DDimApp(ren_ne r p, ren_dim r d)
+    | DUnglue(t_e, g) ->
+        let t_e = List.map (fun (i, j, t) ->
+          (ren_dim r i, ren_dim r j, lazy (ren r t))) t_e in
+        let g = ren_ne r g in
+        DUnglue(t_e, g)
 end
+
+
 module Eval : sig
   open Domain
 
@@ -157,7 +260,7 @@ end = struct
 
   let app f x = force f (function
     (* β rule: (λ x. f x) x ≡ f x *)
-    | DLam(_, fn) -> fn x
+    | DLam(_, fn) -> fn Fun.id x
     | _ -> failwith "unreachable: internal type error")
 
   let fst x = force x (function
