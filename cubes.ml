@@ -1,3 +1,4 @@
+(* ABCFHL cartesian cubical type theory, more or less *)
 type name = string
 
 module AST = struct
@@ -68,10 +69,7 @@ module Core = struct
     | U of int
     | GlueType of { b: ty; t_e: tm partial }
     | GlueTerm of { a: tm partial; b: tm }
-    (* TODO: how much type info is needed here exactly?
-       I think only the function from the equivalence is needed
-       But IDK it might be convenient to just throw the whole [α ↦ T,e] in *)
-    | Unglue of { equiv_fun: tm partial; x: tm }
+    | Unglue of { t_e: tm partial; x: tm }
   and 'a partial = (dim * dim * 'a) list
 end
 
@@ -113,7 +111,7 @@ module Domain = struct
     (* Path *)
     | DDimApp of dne * dim
     (* Universes *)
-    | DUnglue of dne (* TODO: how much more info is needed? *)
+    | DUnglue of dl partial * dne (* TODO: how much info is needed? *)
 
   type env_item = EVal of dl | EDim of dim
   type env = env_item list
@@ -132,10 +130,7 @@ module Eval : sig
   val dim_app : dl -> dim -> d
   val glue_type : dl -> dl partial -> d
   val glue_term : dl partial -> dl -> d
-
-  (* TODO: figure this out *)
-  (* Should it take the whole equivalence as an arg? Just the function? *)
-  (* val unglue : dl -> d *)
+  val unglue : dl partial -> dl -> d
 
   val reify : dl -> dne -> d
 
@@ -150,18 +145,52 @@ end = struct
     | x -> f x
   let (let*) = force
 
-  let app f x =
-    let* DLam(_, fn) = f in fn x
-  let fst x =
-    let* DPair(a, _) = x in Lazy.force a
-  let snd x =
-    let* DPair(_, b) = x in Lazy.force b
-  let dim_app p d =
-    let* DDimAbs(_, fn) = p in fn d
-  let glue_type b t_e =
-    failwith "TODO"
-  let glue_term a b = failwith "TODO"
-  let unglue x = failwith "TODO"
+  let app f x = force f (function
+    (* β rule: (λ x. f x) x ≡ f x *)
+    | DLam(_, fn) -> fn x
+    | _ -> failwith "unreachable: internal type error")
+
+  let fst x = force x (function
+    (* β rule: fst (a, b) ≡ a *)
+    | DPair(a, _) -> Lazy.force a
+    | _ -> failwith "unreachable: internal type error")
+  let snd x = force x (function
+    (* β rule: snd (a, b) ≡ b *)
+    | DPair(_, b) -> Lazy.force b
+    | _ -> failwith "unreachable: internal type error")
+
+  let dim_app p d = force p (function
+    (* β rule: (<i> f i) @ i ≡ f i *)
+    | DDimAbs(_, fn) -> fn d
+    | _ -> failwith "unreachable: internal type error")
+
+  let rec glue_type b t_e = match t_e with
+    (* Cube rule: α ⊢ Glue B [α ↦ T,e] ≡ T *)
+    | (i,j,t_e)::rest ->
+        Depends { eqn = i, j
+                ; yes = lazy (fst t_e)
+                ; no  = lazy (glue_type b rest) }
+    | [] -> DGlueType { b; t_e }
+
+  let rec glue_term a b = match a with
+    (* Cube rule: α ⊢ glue [α ↦ t] b ≡ a *)
+    | (i,j,t)::rest ->
+        Depends { eqn = i, j
+                ; yes = t
+                ; no = lazy (glue_term rest b) }
+    | [] -> DGlueTerm { a; b }
+
+  let rec unglue t_e x = match t_e with
+    (* Cube rule: α ⊢ unglue [α ↦ T,(f,pf)] x ≡ f(x) *)
+    | (i,j,t_f_pf)::rest ->
+        let f = lazy (fst (lazy (snd t_f_pf))) in
+        Depends { eqn = i, j
+                ; yes = lazy (app f x)
+                ; no  = lazy (unglue rest x) }
+    | [] -> force x (function
+      (* β rule: unglue (glue [α ↦ a] (b)) ≡ b *)
+      | DGlueTerm { a = _; b } -> Lazy.force b
+      | _ -> failwith "unreachable: internal type error")
 
   (* Type-directed reification *)
   let rec reify (ty: dl) (tm: dne) = match Lazy.force ty with
@@ -171,13 +200,17 @@ end = struct
                 ; no  = lazy (reify no  tm) }
     | DNe _ -> DNe tm
     | DPi(name, a, b) ->
+        (* η rule: f = λ x. f x *)
         let name = if name = "_" then "x" else name in
         DLam(name, fun x -> reify (lazy (app ty x)) (DApp(tm, x)))
     | DSigma(name, a, b) ->
+        (* η rule: p ≡ (fst(p), snd(p)) *)
         let fst = lazy (reify a (DFst tm)) in
         DPair(fst, lazy (reify (lazy (b fst)) (DSnd tm)))
     | DPathTy(a, lhs, rhs) ->
+        (* η rule: p ≡ <i> p @ i *)
         DDimAbs("i", fun dim ->
+          (* Cube rule: p @ i0 ≡ lhs; p @ i1 ≡ rhs *)
           Depends
             { eqn = dim, Zero
             ; yes = lhs
@@ -187,21 +220,28 @@ end = struct
                 ; no  = lazy (reify a (DDimApp(tm, dim))) }) })
     | DU _ -> DNe tm
     | DGlueType { b; t_e } ->
-        (* when ty = Glue b [α ↦ t], then tm should be
-           glue [α ↦ reify t tm] (unglue g)
-           Depends(α, reify (fst t) tm, Glue tm)
-        TODO figure this out.
-        Don't call GlueTerm directly, use the glue helper function (?)
-         *)
-        failwith "TODO"
-    | DGlueTerm _ ->
-        (* ty : Glue [α ↦ ...] ... is only a type when α holds *)
-        (* when ty = glue [α ↦ t₁ | β ↦ t₂] (b), then tm should be
-           Depends(α, reify t₁ tm,
-           Depends(β, reify t₂ tm, lazy (failwith "unreachable: not a type"))
-        *)
-        failwith "TODO"
-    | DLam _ | DPair _ | DDimAbs _ ->
+        (* η rule: g ≡ glue [α ↦ g] (unglue [α ↦ T,e] g) *)
+        let partial_g = List.map (fun (i, j, t_e) ->
+          (i, j, lazy (reify (lazy (fst t_e)) tm))) t_e in
+
+        (* Cube rule: α ⊢ unglue [α ↦ T,(f,pf)] g ≡ f(g) *)
+        let unglue_tm =
+          List.fold_right2
+            (fun (i, j, t_f_pf) (i', j', g) r ->
+              assert (i = i' && j = j');
+              let f = lazy (fst (lazy (snd t_f_pf))) in
+              lazy (Depends
+                { eqn = i, j
+                ; yes = lazy (app f g)
+                ; no  = r }))
+            t_e partial_g (lazy (reify b (DUnglue(t_e, tm)))) in
+
+        glue_term partial_g unglue_tm
+
+    | DLam _ | DPair _ | DDimAbs _ | DGlueTerm _ ->
+        (* Even though glue(...) could sometimes be a type from the cube rules,
+           it gets evaluated to Depends(α, ty, DGlueTerm _), so this only
+           shows up when α is false and it's for sure not a type. *)
         failwith "unreachable: not a type"
 
   let rec eval (env : env) (tm : Core.tm) = match tm with
@@ -259,10 +299,10 @@ end = struct
         let a = eval_partial env a in
         let b = lazy (eval env b) in
         glue_term a b
-    | Unglue { equiv_fun; x } ->
-        let equiv_fun = eval_partial env equiv_fun in
+    | Unglue { t_e; x } ->
+        let t_e = eval_partial env t_e in
         let x = lazy (eval env x) in
-        failwith "TODO"
+        unglue t_e x
 
   and eval_dim env (d : Core.dim) = match d with
     | Zero -> Zero
@@ -401,31 +441,51 @@ end
 module Pretty : sig
   open Domain
 
+  (* Pretty-printing *)
   val show : Ctx.ctx -> dl -> dl -> string
 end = struct
+  open Domain
+
   (* TODO: pretty-printing *)
+  let show (ctx : Ctx.ctx) ty tm =
+    failwith "TODO"
 end
 
 module Conv : sig
   open Domain
 
+  (* Conversion checking *)
   val eq : Ctx.ctx -> dl -> dl -> dl -> bool
 end = struct
   open Domain
 
   exception NotEqual
 
+  (* TODO: conversion checking *)
   let rec conv (ctx : Ctx.ctx) (ty : dl) (a : dl) (b : dl) =
     failwith "TODO"
 
 
-  
-
+  let eq ctx ty a b =
+    match conv ctx ty a b with
+      | () -> true
+      | exception NotEqual -> false
 end
 
 module Tychk = struct
-  open Core
+  (* open Core *)
   open Domain
+
+  exception TypeError of string
+
+  (* the main check/infer loop! *)
+  let rec check (ctx: Ctx.ctx) (exp: AST.exp) (ty: dl) = match exp, ty with
+    | _ -> failwith "TODO"
+
+  and infer (ctx: Ctx.ctx) (exp: AST.exp) = match exp with
+    | _ -> failwith "TODO"
+
+end
 
 (* Aaaaaaaaaaaa a annoying thing:
   Why are disjunctions in trivial cofibrations a thing anyways?
@@ -533,11 +593,5 @@ Where the Cube Rules run (note: perfectly safe for β rules to take precedence):
 
 
 (* TODO: add ⊤/⊥ types, tt : ⊤, abort : ∀ A → ⊥ → A *)
-
-
-
-
-module Typechecker = struct
-  open Core
 
 
