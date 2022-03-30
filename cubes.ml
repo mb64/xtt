@@ -117,26 +117,33 @@ module Domain = struct
 
   *)
 
-  type dim (*n*) = Zero | DimVar of idx (*n*) | One
-  type eqn = dim * dim
-  type 'a partial = (dim * dim * 'a) list
+  module TypeNats : sig
+    (* Abstract types used to index d by the length of the context *)
+    type z
+    type 'a s
+  end = struct type z = unit and 'a s = unit end
+  include TypeNats
+
+  type 'n dim = Zero | DimVar of idx (*n*) | One
+  type 'n eqn = 'n dim * 'n dim
+  type ('a, 'n) partial = ('n dim * 'n dim * 'a) list
 
   (* Renamings of the dimension context -- it's the Cartesian cube category! *)
   module Ren : sig
-    type ren (* n m *)
+    type ('n, 'm) ren
 
-    val id : ren (* n n *)
-    val compose : ren (* m l *) -> ren (* n m *) -> ren (* n l *)
+    val id : ('n, 'n) ren
+    val compose : ('m, 'l) ren -> ('n, 'm) ren -> ('n, 'l) ren
 
-    val shift_up : ren (* n (n+1) *)
-    val app : dim (* n *) -> ren (* (n+1) n *)
-    val extend : ren (* n n *) -> ren (* (n+1) (n+1) *)
+    val shift_up : ('n, 'n s) ren
+    val app : 'n dim -> ('n s, 'n) ren
+    val extend : ('n, 'm) ren -> ('n s, 'm s) ren
 
-    val ren_dim : ren (* n m *) -> dim (* n *) -> dim (* m *)
+    val ren_dim : ('n, 'm) ren -> 'n dim -> 'm dim
   end = struct
     (* future TODO: defunctionalize to get a more performant implementation
        (I expect it to be crucial for performance!) *)
-    type ren = idx -> dim
+    type ('n, 'm) ren = idx -> 'm dim
     let id x = DimVar x
     let compose r' r x = match r x with
       | Zero -> Zero
@@ -159,63 +166,64 @@ module Domain = struct
   end
   open Ren
 
-  (* an annotation for documentation purposes *)
-  type 'a binds_a_dim = 'a
-
   (* the semantic domain (?) *)
-  type dl = d Lazy.t
-  and d =
+  type 'n dl = 'n d Lazy.t
+  and 'n d =
     (* Basics: neutrals, things that depend on intervals *)
-    | Depends of { eqn: eqn; yes: dl; no: dl }
-    | DNe of dne
+    | Depends of { eqn: 'n eqn; yes: 'n dl; no: 'n dl }
+    | DNe of 'n dne
     (* Pi types *)
-    | DPi of name * dl * (ren -> dl -> d)
-    | DLam of name * (ren -> dl -> d)
+    | DPi of { name: name; a: 'n dl; b: 'm. ('n, 'm) ren -> 'm dl -> 'm d }
+    | DLam of { name: name; f: 'm. ('n, 'm) ren -> 'm dl -> 'm d }
     (* Sigma types *)
-    | DSigma of name * dl * (ren -> dl -> d)
-    | DPair of dl * dl
+    | DSigma of { name: name; a: 'n dl; b: 'm. ('n, 'm) ren -> 'm dl -> 'm d }
+    | DPair of 'n dl * 'n dl
     (* Paths *)
-    | DPathTy of dl * dl * dl
-    | DDimAbs of name * dl binds_a_dim
+    | DPathTy of 'n dl * 'n dl * 'n dl
+    | DDimAbs of name * 'n s dl (* binds a dimension! *)
     (* Universes *)
     | DU of int
-    | DGlueType of { b: dl; t_e: dl partial }
-    | DGlueTerm of { a: dl partial; b: dl }
-  and dne =
+    | DGlueType of { b: 'n dl; t_e: ('n dl, 'n) partial }
+    | DGlueTerm of { a: ('n dl, 'n) partial; b: 'n dl }
+  and 'n dne =
     (* Basics *)
     | DVar of lvl
     | DComp of { z: name
-               ; s: dim; t: dim
-               ; ty: dne binds_a_dim
-               ; partial: dl binds_a_dim partial
-               ; cap: dl }
+               ; s: 'n dim; t: 'n dim
+               ; ty: 'n s dne (* binds a dimension! *)
+               ; partial: ('n s dl, 'n) partial
+               ; cap: 'n dl }
     (* Pi *)
-    | DApp of dne * dl
+    | DApp of 'n dne * 'n dl
     (* Sigma *)
-    | DFst of dne
-    | DSnd of dne
+    | DFst of 'n dne
+    | DSnd of 'n dne
     (* Path *)
-    | DDimApp of dne * dim
+    | DDimApp of 'n dne * 'n dim
     (* Universes *)
-    | DUnglue of dl partial * dne
+    | DUnglue of ('n dl, 'n) partial * 'n dne
 
   (* CHECK: ren id = id
             ren f ∘ ren g = ren (f ∘ g)
    *)
+  type ('n, 'm) ren = ('n, 'm) Ren.ren
+
   let ren_dim = Ren.ren_dim
-  let rec ren (r : ren) (tm : dl): d = match Lazy.force tm with
+
+  let rec ren : 'n 'm. ('n, 'm) ren -> 'n dl -> 'm d =
+    fun r tm -> match Lazy.force tm with
     | Depends { eqn = i, j; yes; no } ->
         Depends { eqn = ren_dim r i, ren_dim r j
                 ; yes = lazy (ren r yes)
                 ; no  = lazy (ren r no) }
     | DNe ne ->
         DNe (ren_ne r ne)
-    | DPi(name, a, b) ->
-        DPi(name, lazy (ren r a), fun s x -> b (compose s r) x)
-    | DLam(name, f) ->
-        DLam(name, fun s x -> f (compose s r) x)
-    | DSigma(name, a, b) ->
-        DSigma(name, lazy (ren r a), fun s x -> b (compose s r) x)
+    | DPi { name; a; b } ->
+        DPi { name; a = lazy (ren r a); b = fun s x -> b (compose s r) x }
+    | DLam { name; f } ->
+        DLam { name; f = fun s x -> f (compose s r) x }
+    | DSigma { name; a; b } ->
+        DSigma { name; a = lazy (ren r a); b = fun s x -> b (compose s r) x }
     | DPair(a, b) ->
         DPair(lazy (ren r a), lazy (ren r b))
     | DPathTy(a, lhs, rhs) ->
@@ -235,7 +243,8 @@ module Domain = struct
         let b = lazy (ren r b) in
         DGlueTerm { a; b }
 
-  and ren_ne r = function
+  and ren_ne : 'n 'm. ('n, 'm) ren -> 'n dne -> 'm dne =
+    fun r tm -> match tm with
     | DVar l -> DVar l
     | DComp { z; s; t; ty; partial; cap } ->
         let r' = extend r in
@@ -260,11 +269,11 @@ module Domain = struct
         let g = ren_ne r g in
         DUnglue(t_e, g)
 
-  type env =
-    | ENil                (* ENil : env n *)
-    | EVal of env * dl    (* EVal : env n -> d n -> env n *)
-    | EDim of env * dim   (* EDim : env n -> dim n -> env n *)
-    | ERen of env * ren   (* ERen : ∀ m. env m -> ren m n -> ren n *)
+  type 'n env =
+    | ENil : 'n env
+    | EVal : 'n env * 'n dl -> 'n env
+    | EDim : 'n env * 'n dim -> 'n env
+    | ERen : 'm env * ('m, 'n) ren -> 'n env
 
 end
 
@@ -273,20 +282,19 @@ module Eval : sig
   open Domain
 
   (* Push computations inside Depends *)
-  val force : dl -> (d -> d) -> d
-  val (let*) : dl -> (d -> d) -> d
+  val force : 'n dl -> ('n d -> 'n d) -> 'n d
 
-  val app : dl -> dl -> d
-  val fst : dl -> d
-  val snd : dl -> d
-  val dim_app : dl -> dim -> d
-  val glue_type : dl -> dl partial -> d
-  val glue_term : dl partial -> dl -> d
-  val unglue : dl partial -> dl -> d
+  val app : 'n dl -> 'n dl -> 'n d
+  val fst : 'n dl -> 'n d
+  val snd : 'n dl -> 'n d
+  val dim_app : 'n dl -> 'n dim -> 'n d
+  val glue_type : 'n dl -> ('n dl, 'n) partial -> 'n d
+  val glue_term : ('n dl, 'n) partial -> 'n dl -> 'n d
+  val unglue : ('n dl, 'n) partial -> 'n dl -> 'n d
 
-  val reify : dl -> dne -> d
+  val reify : 'n dl -> 'n dne -> 'n d
 
-  val eval : env -> Core.tm -> d
+  val eval : 'n env -> Core.tm -> 'n d
 end = struct
   open Domain
 
@@ -295,11 +303,10 @@ end = struct
     | Depends { eqn; yes; no } ->
         Depends { eqn; yes = lazy (force yes f); no = lazy (force no f) }
     | x -> f x
-  let (let*) = force
 
   let app f x = force f (function
     (* β rule: (λ x. f(x)) x ≡ f(x) *)
-    | DLam(_, fn) -> fn Ren.id x
+    | DLam { f } -> f Ren.id x
     | _ -> failwith "unreachable: internal type error")
 
   let fst x = force x (function
@@ -345,17 +352,19 @@ end = struct
       | _ -> failwith "unreachable: internal type error")
 
   (* Type-directed reification *)
-  let rec reify (ty: dl) (tm: dne) = match Lazy.force ty with
+  let rec reify : 'n. 'n dl -> 'n dne -> 'n d = fun ty tm ->
+    match Lazy.force ty with
     | Depends { eqn; yes; no } ->
         Depends { eqn = eqn
                 ; yes = lazy (reify yes tm)
                 ; no  = lazy (reify no  tm) }
     | DNe _ -> DNe tm
-    | DPi(name, a, b) ->
+    | DPi { name; a; b } ->
         (* η rule: f = λ x. f x *)
         let name = if name = "_" then "x" else name in
-        DLam(name, fun r x -> reify (lazy (b r x)) (ren_ne r (DApp(tm, x))))
-    | DSigma(name, a, b) ->
+        DLam { name
+             ; f = fun r x -> reify (lazy (b r x)) (DApp(ren_ne r tm, x)) }
+    | DSigma { name; a; b } ->
         (* η rule: p ≡ (fst(p), snd(p)) *)
         let fst = lazy (reify a (DFst tm)) in
         DPair(fst, lazy (reify (lazy (b Ren.id fst)) (DSnd tm)))
@@ -363,11 +372,11 @@ end = struct
         (* η rule: p ≡ <i> p @ i *)
         DDimAbs("i", lazy begin
           (* Cube rule: p @ i0 ≡ lhs; p @ i1 ≡ rhs *)
-          (* NOTE: bug-prone stuff here! should double check! *)
           let dim = DimVar 0 in
           let a = lazy (ren Ren.shift_up a) in
           let lhs = lazy (ren Ren.shift_up lhs) in
           let rhs = lazy (ren Ren.shift_up rhs) in
+          let tm = ren_ne Ren.shift_up tm in
           Depends
             { eqn = dim, Zero
             ; yes = lhs
@@ -402,22 +411,25 @@ end = struct
            shows up when α is false and it's for sure not a type. *)
         failwith "unreachable: not a type"
 
-  let lookup_tm : idx -> env -> d =
-    let rec go r i = function
+  let lookup_tm : 'n. idx -> 'n env -> 'n d =
+    let rec go : 'm. ('m, 'n) ren -> idx -> 'm env -> 'n d = fun r i e ->
+      match e with
       | ENil -> failwith "unreachable: internal scoping error"
       | EVal(_, x) when i = 0 -> ren r x
       | EVal(e, _) | EDim(e, _) -> go r (i-1) e
       | ERen(e, r') -> go (Ren.compose r r') i e
-    in go Ren.id
-  let lookup_dim : idx -> env -> dim =
-    let rec go r i = function
+    in fun i e -> go Ren.id i e
+  let lookup_dim : 'n. idx -> 'n env -> 'n dim =
+    let rec go : 'm. ('m, 'n) ren -> idx -> 'm env -> 'n dim = fun r i e ->
+      match e with
       | ENil -> failwith "unreachable: internal scoping error"
       | EDim(_, d) when i = 0 -> Ren.ren_dim r d
       | EVal(e, _) | EDim(e, _) -> go r i e
       | ERen(e, r') -> go (Ren.compose r r') i e
-    in go Ren.id
+    in fun i e -> go Ren.id i e
 
-  let rec eval (env : env) (tm : Core.tm) = match tm with
+  let rec eval : 'n. 'n env -> Core.tm -> 'n d = fun env tm ->
+    match tm with
     (* Basics *)
     | Var idx -> lookup_tm idx env
     | Let(x, body) ->
@@ -436,17 +448,21 @@ end = struct
         failwith "unreachable: abort"
 
     (* Pi types *)
-    | Pi(n, a, b) ->
-        DPi(n, lazy (eval env a), fun r x -> eval (EVal(ERen(env, r), x)) b)
-    | Lam(n, body) ->
-        DLam(n, fun r x -> eval (EVal(ERen(env, r), x)) body)
+    | Pi(name, a, b) ->
+        DPi { name
+            ; a = lazy (eval env a)
+            ; b = fun r x -> eval (EVal(ERen(env, r), x)) b }
+    | Lam(name, body) ->
+        DLam { name; f = fun r x -> eval (EVal(ERen(env, r), x)) body }
     | App(f, x) ->
         let f, x = lazy (eval env f), lazy (eval env x) in
         app f x
 
     (* Sigma types *)
-    | Sigma(n, a, b) ->
-        DSigma(n, lazy (eval env a), fun r x -> eval (EVal(ERen(env, r), x)) b)
+    | Sigma(name, a, b) ->
+        DSigma { name
+               ; a = lazy (eval env a)
+               ; b = fun r x -> eval (EVal(ERen(env, r), x)) b }
     | Pair(x, y) ->
         DPair(lazy (eval env x), lazy (eval env y))
     | Fst x ->
@@ -479,18 +495,23 @@ end = struct
         let x = lazy (eval env x) in
         unglue t_e x
 
-  and eval_dim env (d : Core.dim) = match d with
+  and eval_dim : 'n. 'n env -> Core.dim -> 'n dim = fun env d ->
+    match d with
     | Zero -> Zero
     | One  -> One
     | DimVar idx -> lookup_dim idx env
 
-  and eval_partial env (partial : Core.tm Core.partial) =
-    List.map (fun (i, j, tm) ->
-      eval_dim env i, eval_dim env j, lazy (eval env tm)) partial
+  and eval_partial
+    : 'n. 'n env -> Core.tm Core.partial -> ('n dl, 'n) partial
+    = fun env partial ->
+      List.map (fun (i, j, tm) ->
+        eval_dim env i, eval_dim env j, lazy (eval env tm)) partial
 
   (* comp : d (n+1) -> dim n -> dim n -> (d (n+1)) partial -> d n -> d n *)
   (* NOTE: this whole thing is really hairy! try not to mess up indices! *)
-  and comp ty s t partial cap = match Lazy.force ty with
+  and comp
+    : 'n. 'n s dl -> 'n dim -> 'n dim -> ('n s dl, 'n) partial -> 'n dl -> 'n d
+    = fun ty s t partial cap -> match Lazy.force ty with
     | Depends { eqn = i, j; yes; no } when i = j ->
         comp yes s t partial cap
     | Depends { eqn = i, j; yes; no } -> begin
@@ -508,12 +529,12 @@ end = struct
         (* Cube rule: s = t ⊢ comp z. A [s-t] [α ↦ a] (b) ≡ b *)
         (* Cube rule: α ⊢ comp z. A [s-t] [α ↦ a] (b) ≡ a[t/z] *)
         failwith "TODO"
-    | DPi(name, a, b) ->
+    | DPi { name; a; b } ->
         let name = if name = "_" then "x" else name in
-        DLam(name, fun r x ->
+        DLam { name; f = fun r x ->
           (* fuckkkkk *)
-          failwith "TODO")
-    | DSigma(name, a, b) ->
+          failwith "TODO" }
+    | DSigma { name; a; b } ->
         let first = lazy
           (comp a s t
                 (List.map (fun (i, j, x) -> (i, j, lazy (fst x))) partial)
@@ -542,15 +563,21 @@ end = struct
 
   (* hcomp : d n -> dim n -> dim n -> (d (n+1)) partial -> d n -> d n *)
   (* hcomp is composition at a constant type *)
-  and hcomp ty s t partial cap =
+  and hcomp
+    : 'n. 'n dl -> 'n dim -> 'n dim -> ('n s dl, 'n) partial -> 'n dl -> 'n d
+    = fun ty s t partial cap ->
     comp (lazy (ren Ren.shift_up ty)) s t partial cap
 
   (* using fill instead of comp implies that t is a fresh dimension variable *)
-  and fill ty = comp ty
+  and fill
+    : 'n. 'n s dl -> 'n dim -> 'n dim -> ('n s dl, 'n) partial -> 'n dl -> 'n d
+    = fun ty -> comp ty
 
   (* coe : d (n+1) -> dim n -> dim n -> d n -> d n *)
   (* coercion is composition with no partial elements *)
-  and coe ty s t cap = comp ty s t [] cap
+  and coe
+    : 'n. 'n s dl -> 'n dim -> 'n dim -> 'n dl -> 'n d
+    = fun ty s t cap -> comp ty s t [] cap
 end
 
 module Ctx : sig
@@ -726,7 +753,7 @@ module Tychk = struct
 
 end
 
-(* Aaaaaaaaaaaa a annoying thing:
+(* 
   Why are disjunctions in trivial cofibrations a thing anyways?
   What are they for?
   Why merge partial elements?
@@ -746,91 +773,20 @@ end
       on every function
     - Really efficient cofibration entailment
 
-  For this to work, need to check that none of the Kan operations introduce
-  disjunctions in inconvenient places.
-  In particular need to figure out how quantifier elimination works.
-
-
+  Need to figure out how quantifier elimination works
 *)
 
 
-(* Need type-directed conversion checking! Nasty.
+(* Need type-directed conversion checking! Nasty. *)
 
-new domain design, for cube rules: evaluate into a *decision tree* of values:
-
-  type dl = d Lazy.t
-  and d =
-    | Depends of { eqn: dim * dim; yes: dl; no: dl }
-    | Other Stuff
-
-The evaluator doesn't even get access to the cube context; instead, when it
-wants to know if a cube equation holds, it puts a Depends.
-Applications/projections/other continuations distribute over Depends
-
-Then the ctx gets a method
-
-  type 'ctx split_on_eqn_result =
-    | Yes of 'ctx
-    | No of 'ctx
-    | Either of { yes: 'ctx; no: 'ctx }
-
-  class type ctx =
-    object
-      other stuff
-      method split_on_eqn : eqn -> ctx split_on_eqn_result
-    end
-
-(Does only the conv_ctx get it, or does the elab_ctx need it too?
-I think only the conv_ctx needs it; the elab_ctx instead just gets with_eqn)
-
- *)
-
-
-
-(* AAaaaaaaaaaaaAAAAAAA how do I make sure arbitrary neutral forms like
-
-    fst(f x) @ i0
-
-evaluate to the right things????
-
-Answer: *use the full reify machinery!*  Type-directed eta-elongation will make
-it work.  Plus as a bonus it handles other eta stuffs
-
-
-
-can't have disequalities in the elab_ctx:
-during elab, take the 'no' branch when it's not necessarily true, but don't
-enforce that it *stays* not true in every context extension
-  - in elab, 'no' means 'not necessarily'
-  - in conv, 'no' can safely be interpreted as 'necessarily not' (?) possibly?
-→ both contexts should possibly use some other simpler context
-→ WHAT ABOUT: how to do conv at a Depends type???
-
-
-Gotta be *veeeeeeeeeeery careful* not to accidentally throw out information:
-  need to be able to take the 'not necessarily' case but also take the 'yes'
-  case some other time in the short future; being in the 'no' case *does not*
-  grant the evaluator permission to assume it *stays* false
-This seems like a reasonable restriction, but it's vague and I should pin down
-exactly what it means: for how long is it allowed to assume it's false?
-
-I wish there were a better way to do this
-
-
-Need to check: can every cube rule be handled in this way?
-(Can every new η rule be handled in this way too?)
-
+(*
 Where the Cube Rules run (note: perfectly safe for β rules to take precedence):
   - Kan composition: in eval for comp at a neutral type
   - paths: in reification at path type
   - Glue type: in eval for Glue
   - glue term: in eval for glue
   - unglue term: in eval for unglue of a neutral term
-
 *)
 
-
-
 (* TODO: add ⊤/⊥ types, tt : ⊤, abort : ∀ A → ⊥ → A *)
-
 
