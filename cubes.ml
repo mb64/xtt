@@ -102,48 +102,53 @@ module Domain = struct
       | DDimAbs (d (n+1))
       | ...
 
-    (* renaming functions that apply substitutions *)
+    (* renaming functions *)
     (* these witness that d, dne are presheaves on the category of renamings *)
     val ren : ren n m -> d n -> d m
     val ren_ne : ren n m -> dne n -> dne m
   Problem: dimension application p @ i needs to substitute arbitrary dim's, not
   just rename them!
 
-  ATTEMPT 3: Extend the renamings to functions idx -> dim, or, with more types:
+  ATTEMPT 3: Extend the renamings to substitutions idx -> dim:
     type dim n = Zero | DimVar (idx n) | One
-    type ren n m = idx n -> dim m
-  And woah! dim is the +2 monad on FinSet, and ren n m are its Kleisli arrows,
+    type sub n m = idx n -> dim m
+    data d n =
+      | DFun (∀ m. sub n m -> d m -> d m)
+      | ...
+    val subst : sub n m -> d n -> d m
+  And woah! dim is the +2 monad on FinSet, and sub n m are its Kleisli arrows,
   so this makes d, dne exactly presheaves on the Cartesian cube category!
 
   *)
 
   module TypeNats : sig
-    (* Abstract types used to index d by the length of the context *)
+    (* Abstract types used to index things by the length of the context *)
     type z
     type 'a s
-  end = struct type z = unit and 'a s = unit end
+  end = struct type z = Z and 'a s = S end
   include TypeNats
 
   type 'n dim = Zero | DimVar of idx (*n*) | One
   type 'n eqn = 'n dim * 'n dim
   type ('a, 'n) partial = ('n dim * 'n dim * 'a) list
 
-  (* Renamings of the dimension context -- it's the Cartesian cube category! *)
-  module Ren : sig
-    type ('n, 'm) ren
+  (* Substitutions of the dimension context -- it's the Cartesian cube category!
+   *)
+  module Sub : sig
+    type ('n, 'm) sub
 
-    val id : ('n, 'n) ren
-    val compose : ('m, 'l) ren -> ('n, 'm) ren -> ('n, 'l) ren
+    val id : ('n, 'n) sub
+    val compose : ('m, 'l) sub -> ('n, 'm) sub -> ('n, 'l) sub
 
-    val shift_up : ('n, 'n s) ren
-    val app : 'n dim -> ('n s, 'n) ren
-    val extend : ('n, 'm) ren -> ('n s, 'm s) ren
+    val shift_up : ('n, 'n s) sub
+    val app : 'n dim -> ('n s, 'n) sub
+    val extend : ('n, 'm) sub -> ('n s, 'm s) sub
 
-    val ren_dim : ('n, 'm) ren -> 'n dim -> 'm dim
+    val subst_dim : ('n, 'm) sub -> 'n dim -> 'm dim
   end = struct
     (* future TODO: defunctionalize to get a more performant implementation
        (I expect it to be crucial for performance!) *)
-    type ('n, 'm) ren = idx -> 'm dim
+    type ('n, 'm) sub = idx -> 'm dim
     let id x = DimVar x
     let compose r' r x = match r x with
       | Zero -> Zero
@@ -159,24 +164,24 @@ module Domain = struct
         | One  -> One
         | DimVar i' -> DimVar (1 + i')
 
-    let ren_dim r = function
+    let subst_dim r = function
       | Zero -> Zero
       | One  -> One
       | DimVar i -> r i
   end
-  open Ren
+  open Sub
 
   (* the semantic domain (?) *)
-  type 'n dl = 'n d Lazy.t
+  type 'n dl = 'n d lazy_t
   and 'n d =
     (* Basics: neutrals, things that depend on intervals *)
     | Depends of { eqn: 'n eqn; yes: 'n dl; no: 'n dl }
     | DNe of 'n dne
     (* Pi types *)
-    | DPi of { name: name; a: 'n dl; b: 'm. ('n, 'm) ren -> 'm dl -> 'm d }
-    | DLam of { name: name; f: 'm. ('n, 'm) ren -> 'm dl -> 'm d }
+    | DPi of { name: name; a: 'n dl; b: 'm. ('n, 'm) sub -> 'm dl -> 'm d }
+    | DLam of { name: name; f: 'm. ('n, 'm) sub -> 'm dl -> 'm d }
     (* Sigma types *)
-    | DSigma of { name: name; a: 'n dl; b: 'm. ('n, 'm) ren -> 'm dl -> 'm d }
+    | DSigma of { name: name; a: 'n dl; b: 'm. ('n, 'm) sub -> 'm dl -> 'm d }
     | DPair of 'n dl * 'n dl
     (* Paths *)
     | DPathTy of 'n dl * 'n dl * 'n dl
@@ -187,7 +192,10 @@ module Domain = struct
     | DGlueTerm of { a: ('n dl, 'n) partial; b: 'n dl }
   and 'n dne =
     (* Basics *)
-    | DVar of lvl
+    (* Variables remember their type, to reconstruct types during conversion
+       checking. Could look it up in the context instead but this is more
+       convenient *)
+    | DVar of lvl * 'n dl
     | DComp of { z: name
                ; s: 'n dim; t: 'n dim
                ; ty: 'n s dne (* binds a dimension! *)
@@ -203,77 +211,77 @@ module Domain = struct
     (* Universes *)
     | DUnglue of ('n dl, 'n) partial * 'n dne
 
-  (* CHECK: ren id = id
-            ren f ∘ ren g = ren (f ∘ g)
+  (* CHECK: subst id = id
+            subst f ∘ subst g = subst (f ∘ g)
    *)
-  type ('n, 'm) ren = ('n, 'm) Ren.ren
+  type ('n, 'm) sub = ('n, 'm) Sub.sub
 
-  let ren_dim = Ren.ren_dim
+  let subst_dim = Sub.subst_dim
 
-  let rec ren : 'n 'm. ('n, 'm) ren -> 'n dl -> 'm d =
+  let rec subst : 'n 'm. ('n, 'm) sub -> 'n dl -> 'm d =
     fun r tm -> match Lazy.force tm with
     | Depends { eqn = i, j; yes; no } ->
-        Depends { eqn = ren_dim r i, ren_dim r j
-                ; yes = lazy (ren r yes)
-                ; no  = lazy (ren r no) }
+        Depends { eqn = subst_dim r i, subst_dim r j
+                ; yes = lazy (subst r yes)
+                ; no  = lazy (subst r no) }
     | DNe ne ->
-        DNe (ren_ne r ne)
+        DNe (subst_ne r ne)
     | DPi { name; a; b } ->
-        DPi { name; a = lazy (ren r a); b = fun s x -> b (compose s r) x }
+        DPi { name; a = lazy (subst r a); b = fun s x -> b (compose s r) x }
     | DLam { name; f } ->
         DLam { name; f = fun s x -> f (compose s r) x }
     | DSigma { name; a; b } ->
-        DSigma { name; a = lazy (ren r a); b = fun s x -> b (compose s r) x }
+        DSigma { name; a = lazy (subst r a); b = fun s x -> b (compose s r) x }
     | DPair(a, b) ->
-        DPair(lazy (ren r a), lazy (ren r b))
+        DPair(lazy (subst r a), lazy (subst r b))
     | DPathTy(a, lhs, rhs) ->
-        DPathTy(lazy (ren r a), lazy (ren r lhs), lazy (ren r rhs))
+        DPathTy(lazy (subst r a), lazy (subst r lhs), lazy (subst r rhs))
     | DDimAbs(name, p) ->
-        DDimAbs(name, lazy (ren (extend r) p))
+        DDimAbs(name, lazy (subst (extend r) p))
     | DU i ->
         DU i
     | DGlueType { b; t_e } ->
-        let b = lazy (ren r b) in
+        let b = lazy (subst r b) in
         let t_e = List.map (fun (i, j, t) ->
-          (ren_dim r i, ren_dim r j, lazy (ren r t))) t_e in
+          (subst_dim r i, subst_dim r j, lazy (subst r t))) t_e in
         DGlueType { b; t_e }
     | DGlueTerm { a; b } ->
         let a = List.map (fun (i, j, t) ->
-          (ren_dim r i, ren_dim r j, lazy (ren r t))) a in
-        let b = lazy (ren r b) in
+          (subst_dim r i, subst_dim r j, lazy (subst r t))) a in
+        let b = lazy (subst r b) in
         DGlueTerm { a; b }
 
-  and ren_ne : 'n 'm. ('n, 'm) ren -> 'n dne -> 'm dne =
+  and subst_ne : 'n 'm. ('n, 'm) sub -> 'n dne -> 'm dne =
     fun r tm -> match tm with
-    | DVar l -> DVar l
+    | DVar(l, ty) -> DVar(l, lazy (subst r ty))
     | DComp { z; s; t; ty; partial; cap } ->
         let r' = extend r in
-        let ren_partial_elem (i, j, t) =
-          (ren_dim r i, ren_dim r j, lazy (ren r' t)) in
+        let subst_partial_elem (i, j, t) =
+          (subst_dim r i, subst_dim r j, lazy (subst r' t)) in
         DComp { z = z
-              ; s = ren_dim r s; t = ren_dim r t
-              ; ty = ren_ne r' ty
-              ; partial = List.map ren_partial_elem partial
-              ; cap = lazy (ren r cap) }
+              ; s = subst_dim r s; t = subst_dim r t
+              ; ty = subst_ne r' ty
+              ; partial = List.map subst_partial_elem partial
+              ; cap = lazy (subst r cap) }
     | DApp(f, x) ->
-        DApp(ren_ne r f, lazy (ren r x))
+        DApp(subst_ne r f, lazy (subst r x))
     | DFst x ->
-        DFst (ren_ne r x)
+        DFst (subst_ne r x)
     | DSnd x ->
-        DSnd (ren_ne r x)
+        DSnd (subst_ne r x)
     | DDimApp(p, d) ->
-        DDimApp(ren_ne r p, ren_dim r d)
+        DDimApp(subst_ne r p, subst_dim r d)
     | DUnglue(t_e, g) ->
         let t_e = List.map (fun (i, j, t) ->
-          (ren_dim r i, ren_dim r j, lazy (ren r t))) t_e in
-        let g = ren_ne r g in
+          (subst_dim r i, subst_dim r j, lazy (subst r t))) t_e in
+        let g = subst_ne r g in
         DUnglue(t_e, g)
 
   type 'n env =
     | ENil : 'n env
     | EVal : 'n env * 'n dl -> 'n env
     | EDim : 'n env * 'n dim -> 'n env
-    | ERen : 'm env * ('m, 'n) ren -> 'n env
+    | ESub : 'm env * ('m, 'n) sub -> 'n env
 
 end
 
@@ -287,7 +295,10 @@ module Eval : sig
   val app : 'n dl -> 'n dl -> 'n d
   val fst : 'n dl -> 'n d
   val snd : 'n dl -> 'n d
+
+  val un_dim_abs : 'n dl -> 'n s d
   val dim_app : 'n dl -> 'n dim -> 'n d
+
   val glue_type : 'n dl -> ('n dl, 'n) partial -> 'n d
   val glue_term : ('n dl, 'n) partial -> 'n dl -> 'n d
   val unglue : ('n dl, 'n) partial -> 'n dl -> 'n d
@@ -306,7 +317,7 @@ end = struct
 
   let app f x = force f (function
     (* β rule: (λ x. f(x)) x ≡ f(x) *)
-    | DLam { f } -> f Ren.id x
+    | DLam { f } -> f Sub.id x
     | _ -> failwith "unreachable: internal type error")
 
   let fst x = force x (function
@@ -318,10 +329,16 @@ end = struct
     | DPair(_, b) -> Lazy.force b
     | _ -> failwith "unreachable: internal type error")
 
-  let dim_app p d = force p (function
-    (* β rule: (<i> f(i)) @ i ≡ f(i) *)
-    | DDimAbs(_, p) -> ren (Ren.app d) p
-    | _ -> failwith "unreachable: internal type error")
+  let rec un_dim_abs tm = match Lazy.force tm with
+    | Depends { eqn = i, j; yes; no } ->
+        let eqn' = subst_dim Sub.shift_up i, subst_dim Sub.shift_up j in
+        Depends { eqn = eqn'
+                ; yes = lazy (un_dim_abs yes)
+                ; no  = lazy (un_dim_abs no) }
+    | DDimAbs(_, p) -> Lazy.force p
+    | _ -> failwith "unreachable: internal type error: should'a been a path"
+
+  let dim_app p d = subst (Sub.app d) (lazy (un_dim_abs p))
 
   let rec glue_type b t_e = match t_e with
     (* Cube rule: α ⊢ Glue B [α ↦ T,e] ≡ T *)
@@ -363,20 +380,20 @@ end = struct
         (* η rule: f = λ x. f x *)
         let name = if name = "_" then "x" else name in
         DLam { name
-             ; f = fun r x -> reify (lazy (b r x)) (DApp(ren_ne r tm, x)) }
+             ; f = fun r x -> reify (lazy (b r x)) (DApp(subst_ne r tm, x)) }
     | DSigma { name; a; b } ->
         (* η rule: p ≡ (fst(p), snd(p)) *)
         let fst = lazy (reify a (DFst tm)) in
-        DPair(fst, lazy (reify (lazy (b Ren.id fst)) (DSnd tm)))
+        DPair(fst, lazy (reify (lazy (b Sub.id fst)) (DSnd tm)))
     | DPathTy(a, lhs, rhs) ->
         (* η rule: p ≡ <i> p @ i *)
         DDimAbs("i", lazy begin
           (* Cube rule: p @ i0 ≡ lhs; p @ i1 ≡ rhs *)
           let dim = DimVar 0 in
-          let a = lazy (ren Ren.shift_up a) in
-          let lhs = lazy (ren Ren.shift_up lhs) in
-          let rhs = lazy (ren Ren.shift_up rhs) in
-          let tm = ren_ne Ren.shift_up tm in
+          let a = lazy (subst Sub.shift_up a) in
+          let lhs = lazy (subst Sub.shift_up lhs) in
+          let rhs = lazy (subst Sub.shift_up rhs) in
+          let tm = subst_ne Sub.shift_up tm in
           Depends
             { eqn = dim, Zero
             ; yes = lhs
@@ -406,27 +423,27 @@ end = struct
         glue_term partial_g unglue_tm
 
     | DLam _ | DPair _ | DDimAbs _ | DGlueTerm _ ->
-        (* Even though glue(...) could sometimes be a type from the cube rules,
+        (* Even though glue(...) could sometimes be a type via the cube rules,
            it gets evaluated to Depends(α, ty, DGlueTerm _), so DGlueTerm only
            shows up when α is false and it's for sure not a type. *)
         failwith "unreachable: not a type"
 
   let lookup_tm : 'n. idx -> 'n env -> 'n d =
-    let rec go : 'm. ('m, 'n) ren -> idx -> 'm env -> 'n d = fun r i e ->
+    let rec go : 'm. ('m, 'n) sub -> idx -> 'm env -> 'n d = fun r i e ->
       match e with
       | ENil -> failwith "unreachable: internal scoping error"
-      | EVal(_, x) when i = 0 -> ren r x
+      | EVal(_, x) when i = 0 -> subst r x
       | EVal(e, _) | EDim(e, _) -> go r (i-1) e
-      | ERen(e, r') -> go (Ren.compose r r') i e
-    in fun i e -> go Ren.id i e
+      | ESub(e, r') -> go (Sub.compose r r') i e
+    in fun i e -> go Sub.id i e
   let lookup_dim : 'n. idx -> 'n env -> 'n dim =
-    let rec go : 'm. ('m, 'n) ren -> idx -> 'm env -> 'n dim = fun r i e ->
+    let rec go : 'm. ('m, 'n) sub -> idx -> 'm env -> 'n dim = fun r i e ->
       match e with
       | ENil -> failwith "unreachable: internal scoping error"
-      | EDim(_, d) when i = 0 -> Ren.ren_dim r d
+      | EDim(_, d) when i = 0 -> subst_dim r d
       | EVal(e, _) | EDim(e, _) -> go r i e
-      | ERen(e, r') -> go (Ren.compose r r') i e
-    in fun i e -> go Ren.id i e
+      | ESub(e, r') -> go (Sub.compose r r') i e
+    in fun i e -> go Sub.id i e
 
   let rec eval : 'n. 'n env -> Core.tm -> 'n d = fun env tm ->
     match tm with
@@ -435,7 +452,7 @@ end = struct
     | Let(x, body) ->
         eval (EVal(env, lazy (eval env x))) body
     | Comp { ty; s; t; partial; cap } ->
-        let env' = EDim(ERen(env, Ren.shift_up), DimVar 0) in
+        let env' = EDim(ESub(env, Sub.shift_up), DimVar 0) in
         (* ty : d (n+1) *)
         let ty = lazy (eval env' ty) in
         let s, t = eval_dim env s, eval_dim env t in
@@ -451,9 +468,9 @@ end = struct
     | Pi(name, a, b) ->
         DPi { name
             ; a = lazy (eval env a)
-            ; b = fun r x -> eval (EVal(ERen(env, r), x)) b }
+            ; b = fun r x -> eval (EVal(ESub(env, r), x)) b }
     | Lam(name, body) ->
-        DLam { name; f = fun r x -> eval (EVal(ERen(env, r), x)) body }
+        DLam { name; f = fun r x -> eval (EVal(ESub(env, r), x)) body }
     | App(f, x) ->
         let f, x = lazy (eval env f), lazy (eval env x) in
         app f x
@@ -462,7 +479,7 @@ end = struct
     | Sigma(name, a, b) ->
         DSigma { name
                ; a = lazy (eval env a)
-               ; b = fun r x -> eval (EVal(ERen(env, r), x)) b }
+               ; b = fun r x -> eval (EVal(ESub(env, r), x)) b }
     | Pair(x, y) ->
         DPair(lazy (eval env x), lazy (eval env y))
     | Fst x ->
@@ -475,7 +492,7 @@ end = struct
         DPathTy(lazy (eval env a), lazy (eval env lhs), lazy (eval env rhs))
     | DimAbs(n, tm) ->
         (* No need to handle cube rules here; it's handled in reify *)
-        let env' = EDim(ERen(env, Ren.shift_up), DimVar 0) in
+        let env' = EDim(ESub(env, Sub.shift_up), DimVar 0) in
         DDimAbs(n, lazy (eval env' tm))
     | DimApp(p, d) ->
         dim_app (lazy (eval env p)) (eval_dim env d)
@@ -507,8 +524,6 @@ end = struct
       List.map (fun (i, j, tm) ->
         eval_dim env i, eval_dim env j, lazy (eval env tm)) partial
 
-  (* comp : d (n+1) -> dim n -> dim n -> (d (n+1)) partial -> d n -> d n *)
-  (* NOTE: this whole thing is really hairy! try not to mess up indices! *)
   and comp
     : 'n. 'n s dl -> 'n dim -> 'n dim -> ('n s dl, 'n) partial -> 'n dl -> 'n d
     = fun ty s t partial cap -> match Lazy.force ty with
@@ -525,35 +540,81 @@ end = struct
                   ; yes = lazy (comp yes s t partial cap)
                   ; no  = lazy (comp no  s t partial cap) }
         end
+
     | DNe ne ->
         (* Cube rule: s = t ⊢ comp z. A [s-t] [α ↦ a] (b) ≡ b *)
         (* Cube rule: α ⊢ comp z. A [s-t] [α ↦ a] (b) ≡ a[t/z] *)
         failwith "TODO"
+
     | DPi { name; a; b } ->
         let name = if name = "_" then "x" else name in
-        DLam { name; f = fun r x ->
-          (* fuckkkkk *)
-          failwith "TODO" }
+        DLam { name; f = fun (type m) r (x : m dl) ->
+          (* do a buncha substituting *)
+          let a: m s dl = lazy (subst (Sub.extend r) a) in
+          let s, t = subst_dim r s, subst_dim r t in
+          let cap: m dl = lazy (subst r cap) in
+
+          let shift: (m, m s) sub = Sub.shift_up in
+          let shift' = Sub.extend shift in
+          let fill_x: m s dl = lazy
+            (coe (lazy (subst shift' a)) (subst_dim shift s) (DimVar 0)
+                 (lazy (subst shift x))) in
+          let new_comp_ty = lazy (b (Sub.extend r) fill_x) in
+          let new_partial = List.map (fun (i, j, v) ->
+            let v: m s dl = lazy (subst (Sub.extend r) v) in
+            (subst_dim r i, subst_dim r j, lazy (app v fill_x))) partial in
+          let coe_x = lazy (coe a s t x) in
+          let new_cap: m dl = lazy (app cap coe_x) in
+          comp new_comp_ty s t new_partial new_cap }
+
     | DSigma { name; a; b } ->
         let first = lazy
           (comp a s t
                 (List.map (fun (i, j, x) -> (i, j, lazy (fst x))) partial)
                 (lazy (fst cap))) in
-        let r, r' = Ren.shift_up, Ren.extend Ren.shift_up in
-        let first_path (* : d (n+1) *) = lazy
-          (fill (lazy (ren r' a)) (Ren.ren_dim r s) (DimVar 0)
+        let shift: ('n, 'n s) sub = Sub.shift_up in
+        let shift' = Sub.extend shift in
+        let first_path : 'n s dl = lazy
+          (fill (lazy (subst shift' a)) (subst_dim shift s) (DimVar 0)
                 (List.map (fun (i, j, x) ->
-                  ( Ren.ren_dim r i
-                  , Ren.ren_dim r j
-                  , lazy (ren r' (lazy (fst x))))) partial)
-                (lazy (ren r (lazy (fst cap))))) in
+                  ( subst_dim shift i
+                  , subst_dim shift j
+                  , lazy (subst shift' (lazy (fst x))))) partial)
+                (lazy (subst shift (lazy (fst cap))))) in
         let second = lazy
-          (comp (lazy (b Ren.id first_path)) s t
+          (comp (lazy (b Sub.id first_path)) s t
                 (List.map (fun (i, j, x) -> (i, j, lazy (snd x))) partial)
                 (lazy (snd cap))) in
         DPair(first, second)
+
     | DPathTy(a, lhs, rhs) ->
-        failwith "TODO"
+        let shift: ('n, 'n s) sub = Sub.shift_up in
+        let shift' = Sub.extend shift in
+        let new_ty = lazy (subst shift' a) in
+
+        (* currently: Ψ,i,z ⊢ partial *)
+        (* want:      Ψ,z,i ⊢ partial *)
+        (* [Ψ,i,z]
+              ↓ extend (extend shift_up)
+           [ψ,·,i,z]
+              ↓ app (DimVar 1)
+           [ψ,z,i]
+         *)
+        let swap: ('n s s, 'n s s) sub =
+          Sub.(compose (app (DimVar 1)) (extend shift')) in
+        let renamed_partial: ('n s s dl, 'n s) partial =
+          List.map (fun (i, j, v) ->
+            let v' = lazy (subst swap (lazy (un_dim_abs v))) in
+            (subst_dim shift i, subst_dim shift j, v')) partial in
+        let new_partial =
+          (DimVar 0, Zero, lazy (subst shift' lhs)) ::
+          (DimVar 0, One,  lazy (subst shift' rhs)) :: renamed_partial in
+
+        let s, t = subst_dim shift s, subst_dim shift t in
+        let new_cap: 'n s dl = lazy (un_dim_abs cap) in
+
+        DDimAbs("i", lazy (comp new_ty s t new_partial new_cap))
+
     | DU univ_idx -> (* oh no *)
         failwith "TODO"
     | DGlueType { b; t_e } -> (* oh no *)
@@ -561,19 +622,17 @@ end = struct
     | DLam _ | DPair _ | DDimAbs _ | DGlueTerm _ ->
         failwith "unreachable: type error: not a type"
 
-  (* hcomp : d n -> dim n -> dim n -> (d (n+1)) partial -> d n -> d n *)
   (* hcomp is composition at a constant type *)
   and hcomp
     : 'n. 'n dl -> 'n dim -> 'n dim -> ('n s dl, 'n) partial -> 'n dl -> 'n d
     = fun ty s t partial cap ->
-    comp (lazy (ren Ren.shift_up ty)) s t partial cap
+    comp (lazy (subst Sub.shift_up ty)) s t partial cap
 
   (* using fill instead of comp implies that t is a fresh dimension variable *)
   and fill
     : 'n. 'n s dl -> 'n dim -> 'n dim -> ('n s dl, 'n) partial -> 'n dl -> 'n d
     = fun ty -> comp ty
 
-  (* coe : d (n+1) -> dim n -> dim n -> d n -> d n *)
   (* coercion is composition with no partial elements *)
   and coe
     : 'n. 'n s dl -> 'n dim -> 'n dim -> 'n dl -> 'n d
@@ -585,157 +644,167 @@ module Ctx : sig
 
   exception NotInScope of name
 
-  (* don't particularly like it but it's eh *)
-  type 'ctx split_on_eqn_result =
-    | Yes of 'ctx
-    | No of 'ctx
-    | Either of { yes: 'ctx; no: 'ctx }
+  type 'n t
 
-  class type ctx =
-    object
-      method lvl : lvl
-      method env : env
-      method names : name list
-      method lookup_var : name -> dl * dl
-      method lookup_dim : name -> dim
-      method with_var  : name -> dl -> dl * ctx
-      method with_defn : name -> dl -> dl -> ctx
-      method with_dim_var : name -> dim * ctx
-      method with_eqn : eqn -> ctx option
-      method split_on_eqn : eqn -> ctx split_on_eqn_result
-      method entails : eqn -> bool
-      method are_cofibs_equal : eqn list -> eqn list -> bool
-    end
+  val initial_ctx : z t
 
-  val initial_ctx : ctx
+  val lvl : 'n t -> lvl
+  val env : 'n t -> 'n env
+  val names : 'n t -> name list
+  val lookup_var : 'n t -> name -> idx * 'n dl
+  val lookup_dim : 'n t -> name -> idx
+  val with_defn : 'n t -> name -> 'n dl -> 'n dl -> 'n t
+  val with_var : 'n t -> name -> 'n dl -> 'n dl * 'n t
+  val with_dim_var : 'n t -> name -> 'n s dim * 'n s t
+  val with_eqn : 'n t -> 'n eqn -> 'n t option
+  val entails : 'n t -> 'n eqn -> bool
+  val are_cofibs_equal : 'n t -> 'n eqn list -> 'n eqn list -> bool
 end = struct
-  (* TODO FIXME: this is wrong!
-     It still treats dim vars as levels, not indices!
-     Need to rethink how it works! *)
   open Domain
 
   exception NotInScope of name
 
+  type 'n tys =
+    | TNil : 'n tys
+    | TVal : 'n tys * 'n dl * name -> 'n tys
+    | TDim : 'n tys * name -> 'n tys
+    | TSub : 'm tys * ('m, 'n) sub -> 'n tys
+
   module IntMap = Map.Make (Int)
   type formula = int IntMap.t
 
-  let find dim formula =
+  type 'n t =
+    { n_dim_vars : int
+    ; lvl : lvl
+    (* heck *)
+    ; names : name list
+    ; tys : 'n tys
+    ; env : 'n env
+    ; formula : formula }
+
+  let find ctx dim =
     let rec go i =
-      let p = IntMap.find i formula in
+      let p = IntMap.find i ctx.formula in
       if p = i then i else go p in
-    go (match dim with Zero -> 0 | One -> 1 | DimVar x -> 2 + x)
-  let union d1 d2 formula =
-    let a, b = find d1 formula, find d2 formula in
-    IntMap.add (min a b) (max a b) formula
-  let is_inconsistent formula diseq =
-    List.exists (fun (a, b) -> find a formula = find b formula) diseq
+    go (match dim with
+        | Zero -> 0
+        | One  -> 1
+        | DimVar i -> 1 + ctx.n_dim_vars - i)
+  let union ctx d1 d2 =
+    let a, b = find ctx d1, find ctx d2 in
+    IntMap.add (min a b) (max a b) ctx.formula
+  let is_inconsistent ctx =
+    find ctx Zero = find ctx One
 
-  type 'ctx split_on_eqn_result =
-    | Yes of 'ctx
-    | No of 'ctx
-    | Either of { yes: 'ctx; no: 'ctx }
 
-  class ctx lvl names tys env formula diseq =
-    object (self)
-      method lvl : lvl = lvl
-      method env : env = env
-      method names : name list = names
+  let initial_ctx: z t =
+    { n_dim_vars = 0
+    ; lvl = 0
+    ; names = []
+    ; tys = TNil
+    ; env = ENil
+    ; formula = IntMap.empty }
 
-      method lookup_var name =
-        let rec go r ns ts es = match ns, ts, es with
-          | _, _, ERen(es, r') -> go (Ren.compose r r') ns ts es
-          | n::_, Some t::_, EVal(_, e) when n = name -> t, ren r e
-          | _::ns, _::ts, (EVal(e, _) | EDim(e, _)) -> go r ns ts es
-          | [], [], ENil -> raise (NotInScope name)
-          | _ -> failwith "unreachable" in
-        go Ren.id names tys env
-      method lookup_dim name =
-        let rec go r ns ts es = match ns, ts, es with
-          | _, _, ERen(es, r') -> go (Ren.compose r r') ns ts es
-          | n::_, Some t::_, EDim(_, d) when n = name -> t, ren_dim r d
-          | _::ns, _::ts, (EVal(e, _) | EDim(e, _)) -> go r ns ts es
-          | [], [], ENil -> raise (NotInScope name)
-          | _ -> failwith "unreachable" in
-        go Ren.id names tys env
+  let lvl (ctx : 'n t) = ctx.lvl
+  let env (ctx : 'n t) = ctx.env
+  let names (ctx : 'n t) = ctx.names
 
-      method with_defn name ty x =
-        let ctx' = new ctx (lvl+1)
-          (name::names) (Some ty::tys) (EVal(env, x))
-          formula diseq in
-        ctx'
-      method with_var name ty =
-        let x = lazy (Eval.reify ty (DVar lvl)) in
-        x, self#with_defn name ty x
-      method with_dim_var name =
-        let x = DimVar lvl in
-        let ctx' = new ctx (lvl+1)
-          (name::names) (None::tys) (EDim(env, x))
-          formula diseq in
-        x, ctx'
+  let lookup_var (ctx : 'n t) name = 
+    let rec go : 'm. int -> ('m, 'n) sub -> 'm tys -> _ =
+      fun i r t -> match t with
+      | TSub(t, r') -> go i (Sub.compose r r') t
+      | TVal(_, t, n) when n = name ->
+          i, lazy (subst r t)
+      | TVal(t, _, _) | TDim(t, _) -> go (i+1) r t
+      | TNil -> raise (NotInScope name) in
+    go 0 Sub.id ctx.tys
 
-      method with_eqn (x, y) =
-        let formula' = union x y formula in
-        if is_inconsistent formula diseq then
-          None
-        else
-          Some (new ctx lvl names tys env formula' diseq)
-      method split_on_eqn (x, y) =
-        if find x formula = find y formula then
-          Yes (self :> ctx)
-        else
-          let formula' = union x y formula in
-          if is_inconsistent formula' diseq then
-            No (self :> ctx)
-          else
-            Either { yes = new ctx lvl names tys env formula' diseq
-                   ; no  = new ctx lvl names tys env formula ((x,y)::diseq) }
+  let lookup_dim (ctx : 'n t) name =
+    let rec go : 't. int -> 't tys -> _ =
+      fun i t -> match t with
+      | TSub(t, _) -> go i t
+      | TDim(_, n) when n = name -> i
+      | TDim(t, _) | TVal(t, _, _) -> go (i+1) t
+      | TNil -> raise (NotInScope name) in
+    go 0 ctx.tys
 
-      method entails (x, y) =
-        find x formula = find y formula
+  let with_defn (ctx : 'n t) name ty x =
+    { n_dim_vars = ctx.n_dim_vars
+    ; lvl = ctx.lvl + 1
+    ; names = name :: ctx.names
+    ; tys = TVal(ctx.tys, ty, name)
+    ; env = EVal(ctx.env, x)
+    ; formula = ctx.formula }
 
-      method are_cofibs_equal xs ys =
-        let implies a b =
-          List.for_all (fun (x, y) ->
-            is_inconsistent (union x y formula) b) a in
-        implies xs ys && implies ys xs
-    end
+  let with_var (ctx : 'n t) name ty =
+    let x = lazy (Eval.reify ty (DVar ctx.lvl)) in
+    x, with_defn ctx name ty x
 
-  let initial_ctx =
-    new ctx 0 [] [] ENil IntMap.(add 0 0 (singleton 1 1)) [Zero, One]
+  let with_dim_var (ctx : 'n t) name =
+    let x = DimVar 0 in
+    x,
+    { n_dim_vars = ctx.n_dim_vars + 1
+    ; lvl = ctx.lvl + 1
+    ; names = name :: ctx.names
+    ; tys = TDim(TSub(ctx.tys, Sub.shift_up), name)
+    ; env = EDim(ESub(ctx.env, Sub.shift_up), x)
+    ; formula = ctx.formula }
+
+  let with_eqn (ctx : 'n t) (x, y) =
+    let formula = union ctx x y in
+    let ctx' = { ctx with formula } in
+    if is_inconsistent ctx' then None else Some ctx'
+
+  let entails (ctx : 'n t) (x, y) =
+    find ctx x = find ctx y
+
+  let are_cofibs_equal (ctx : 'n t) a b =
+    (* TODO: make sure this does the right thing *)
+    let implies x y =
+      List.for_all (fun e ->
+        match with_eqn ctx e with
+        | None -> true
+        | Some ctx' -> List.exists (entails ctx') y) x in
+    implies a b && implies b a
+
 end
 
 module Pretty : sig
   open Domain
 
   (* Pretty-printing *)
-  val show : Ctx.ctx -> dl -> dl -> string
+  val show : 'n Ctx.t -> 'n dl -> 'n dl -> string
 end = struct
   open Domain
 
   (* TODO: pretty-printing *)
-  let show (ctx : Ctx.ctx) ty tm =
+  let show (ctx : 'n Ctx.t) ty tm =
     failwith "TODO"
 end
 
 module Conv : sig
   open Domain
 
+  exception Mismatch of string * string
+
   (* Conversion checking *)
-  val eq : Ctx.ctx -> dl -> dl -> dl -> bool
+  val eq : 'n Ctx.t -> 'n dl -> 'n dl -> 'n dl -> unit
 end = struct
   open Domain
 
   exception NotEqual
+  exception Mismatch of string * string
 
   (* TODO: conversion checking *)
-  let rec conv (ctx : Ctx.ctx) (ty : dl) (a : dl) (b : dl) =
+  let rec conv : 'n. 'n Ctx.t -> 'n dl -> 'n dl -> 'n dl -> unit =
+    fun ctx ty a b ->
     failwith "TODO"
 
 
   let eq ctx ty a b =
-    match conv ctx ty a b with
-      | () -> true
-      | exception NotEqual -> false
+    try conv ctx ty a b
+    with NotEqual ->
+      raise (Mismatch(Pretty.show ctx ty a, Pretty.show ctx ty b))
 end
 
 module Tychk = struct
@@ -745,10 +814,12 @@ module Tychk = struct
   exception TypeError of string
 
   (* the main check/infer loop! *)
-  let rec check (ctx: Ctx.ctx) (exp: AST.exp) (ty: dl) = match exp, ty with
+  let rec check : 'n. 'n Ctx.t -> AST.exp -> 'n dl -> Core.tm =
+    fun ctx exp ty -> match exp, ty with
     | _ -> failwith "TODO"
 
-  and infer (ctx: Ctx.ctx) (exp: AST.exp) = match exp with
+  and infer : 'n. 'n Ctx.t -> AST.exp -> 'n dl * Core.tm =
+    fun ctx exp -> match exp with
     | _ -> failwith "TODO"
 
 end
@@ -789,4 +860,7 @@ Where the Cube Rules run (note: perfectly safe for β rules to take precedence):
 *)
 
 (* TODO: add ⊤/⊥ types, tt : ⊤, abort : ∀ A → ⊥ → A *)
+
+(* Hmmmm, should I make path be pathp, or keep it as path? *)
+
 
