@@ -283,6 +283,10 @@ module Domain = struct
     | EDim : 'n env * 'n dim -> 'n env
     | ESub : 'm env * ('m, 'n) sub -> 'n env
 
+  let esub env s = match env with
+    | ESub(e, s') -> ESub(e, Sub.compose s s')
+    | _ -> ESub(env, s)
+
 end
 
 
@@ -319,7 +323,7 @@ end = struct
   let rec type_of_ne : 'n. 'n dne -> 'n d = function
     | DVar(_, ty) -> Lazy.force ty
     | DComp { t; ty } ->
-        failwith "TODO"
+        DNe (subst_ne (Sub.app t) ty)
     | DApp(f, arg) ->
         force' (type_of_ne f) (function
           | DPi { b } -> b Sub.id arg
@@ -365,9 +369,24 @@ end = struct
                 ; no  = lazy (un_dim_abs no) }
     | DDimAbs(_, p) -> Lazy.force p
     | DNe ne ->
-        (* TODO: I think here is probably the right place to handle the path
-           cube rules? *)
-        failwith "TODO"
+        (* Cube rule: if p : Path A x y, then p @ i0 ≡ x and p @ i1 ≡ y *)
+        let rec go = function
+          | Depends { eqn = i, j; yes; no } ->
+              let eqn' = subst_dim Sub.shift_up i, subst_dim Sub.shift_up j in
+              Depends { eqn = eqn'
+                      ; yes = lazy (go (Lazy.force yes))
+                      ; no  = lazy (go (Lazy.force no)) }
+          | DPathTy(_, lhs, rhs) ->
+              let i = DimVar 0 in
+              let ne' = subst_ne Sub.shift_up ne in
+              Depends { eqn = i, Zero
+                      ; yes = lazy (subst Sub.shift_up lhs)
+                      ; no  = lazy (Depends
+                        { eqn = i, One
+                        ; yes = lazy (subst Sub.shift_up rhs)
+                        ; no  = lazy (DNe (DDimApp(ne', i))) }) }
+          | _ -> failwith "unreachable: internal type error" in
+        go (type_of_ne ne)
     | _ -> failwith "unreachable: internal type error: should'a been a path"
 
   let dim_app p d = subst (Sub.app d) (lazy (un_dim_abs p))
@@ -425,12 +444,10 @@ end = struct
     | Let(x, body) ->
         eval (EVal(env, lazy (eval env x))) body
     | Comp { ty; s; t; partial; cap } ->
-        let env' = EDim(ESub(env, Sub.shift_up), DimVar 0) in
-        (* ty : d (n+1) *)
-        let ty = lazy (eval env' ty) in
+        let env' = EDim(esub env Sub.shift_up, DimVar 0) in
+        let ty : 'n s dl = lazy (eval env' ty) in
         let s, t = eval_dim env s, eval_dim env t in
-        (* partial : (d (n+1)) partial *)
-        let partial = List.map (fun (i, j, t) ->
+        let partial : ('n s dl, 'n) partial = List.map (fun (i, j, t) ->
           (eval_dim env i, eval_dim env j, lazy (eval env' t))) partial in
         let cap = lazy (eval env cap) in
         comp ty s t partial cap
@@ -441,9 +458,9 @@ end = struct
     | Pi(name, a, b) ->
         DPi { name
             ; a = lazy (eval env a)
-            ; b = fun r x -> eval (EVal(ESub(env, r), x)) b }
+            ; b = fun r x -> eval (EVal(esub env r, x)) b }
     | Lam(name, body) ->
-        DLam { name; f = fun r x -> eval (EVal(ESub(env, r), x)) body }
+        DLam { name; f = fun r x -> eval (EVal(esub env r, x)) body }
     | App(f, x) ->
         let f, x = lazy (eval env f), lazy (eval env x) in
         app f x
@@ -452,7 +469,7 @@ end = struct
     | Sigma(name, a, b) ->
         DSigma { name
                ; a = lazy (eval env a)
-               ; b = fun r x -> eval (EVal(ESub(env, r), x)) b }
+               ; b = fun r x -> eval (EVal(esub env r, x)) b }
     | Pair(x, y) ->
         DPair(lazy (eval env x), lazy (eval env y))
     | Fst x ->
@@ -464,7 +481,7 @@ end = struct
     | PathTy(a, lhs, rhs) ->
         DPathTy(lazy (eval env a), lazy (eval env lhs), lazy (eval env rhs))
     | DimAbs(n, tm) ->
-        let env' = EDim(ESub(env, Sub.shift_up), DimVar 0) in
+        let env' = EDim(esub env Sub.shift_up, DimVar 0) in
         DDimAbs(n, lazy (eval env' tm))
     | DimApp(p, d) ->
         dim_app (lazy (eval env p)) (eval_dim env d)
@@ -514,9 +531,19 @@ end = struct
         end
 
     | DNe ne ->
-        (* Cube rule: s = t ⊢ comp z. A [s-t] [α ↦ a] (b) ≡ b *)
+        let z = "z" in (* TODO: pass around the actual name *)
         (* Cube rule: α ⊢ comp z. A [s-t] [α ↦ a] (b) ≡ a[t/z] *)
-        failwith "TODO"
+        let rec go = function
+          | [] -> DNe (DComp { z; s; t; ty = ne; partial; cap })
+          | (i, j, a)::rest ->
+              Depends { eqn = i, j
+                      ; yes = lazy (subst (Sub.app t) a)
+                      ; no  = lazy (go rest) } in
+
+        (* Cube rule: s = t ⊢ comp z. A [s-t] [α ↦ a] (b) ≡ b *)
+        Depends { eqn = s, t
+                ; yes = cap
+                ; no  = lazy (go partial) }
 
     | DPi { name; a; b } ->
         let name = if name = "_" then "x" else name in
@@ -591,6 +618,7 @@ end = struct
         failwith "TODO"
     | DGlueType { b; t_e } -> (* oh no *)
         failwith "TODO"
+
     | DLam _ | DPair _ | DDimAbs _ | DGlueTerm _ ->
         failwith "unreachable: type error: not a type"
 
@@ -643,6 +671,10 @@ end = struct
     | TDim : 'n tys * name -> 'n tys
     | TSub : 'm tys * ('m, 'n) sub -> 'n tys
 
+  let tsub tys s = match tys with
+    | TSub(t, s') -> TSub(t, Sub.compose s s')
+    | _ -> TSub(tys, s)
+
   module IntMap = Map.Make (Int)
   type formula = int IntMap.t
 
@@ -650,6 +682,9 @@ end = struct
     { n_dim_vars : int
     ; lvl : lvl
     (* heck *)
+    (* TODO: make lvl be only for term variables
+       separate the term variable names from dimension variable names
+       *)
     ; names : name list
     ; tys : 'n tys
     ; env : 'n env
@@ -668,7 +703,6 @@ end = struct
     IntMap.add (min a b) (max a b) ctx.formula
   let is_inconsistent ctx =
     find ctx Zero = find ctx One
-
 
   let initial_ctx: z t =
     { n_dim_vars = 0
@@ -719,8 +753,8 @@ end = struct
     { n_dim_vars = ctx.n_dim_vars + 1
     ; lvl = ctx.lvl + 1
     ; names = name :: ctx.names
-    ; tys = TDim(TSub(ctx.tys, Sub.shift_up), name)
-    ; env = EDim(ESub(ctx.env, Sub.shift_up), x)
+    ; tys = TDim(tsub ctx.tys Sub.shift_up, name)
+    ; env = EDim(esub ctx.env Sub.shift_up, x)
     ; formula = ctx.formula }
 
   let with_eqn (ctx : 'n t) (x, y) =
