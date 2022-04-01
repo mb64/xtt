@@ -194,7 +194,7 @@ module Domain = struct
     (* Basics *)
     (* Variables remember their type, to reconstruct types during conversion
        checking. Could look it up in the context instead but this is more
-       convenient *)
+       convenient, plus it lets evaluation use types for interval application *)
     | DVar of lvl * 'n dl
     | DComp of { z: name
                ; s: 'n dim; t: 'n dim
@@ -292,6 +292,8 @@ module Eval : sig
   (* Push computations inside Depends *)
   val force : 'n dl -> ('n d -> 'n d) -> 'n d
 
+  val type_of_ne : 'n dne -> 'n d
+
   val app : 'n dl -> 'n dl -> 'n d
   val fst : 'n dl -> 'n d
   val snd : 'n dl -> 'n d
@@ -303,30 +305,56 @@ module Eval : sig
   val glue_term : ('n dl, 'n) partial -> 'n dl -> 'n d
   val unglue : ('n dl, 'n) partial -> 'n dl -> 'n d
 
-  val reify : 'n dl -> 'n dne -> 'n d
-
   val eval : 'n env -> Core.tm -> 'n d
 end = struct
   open Domain
 
   (* Push computations inside Depends *)
-  let rec force x f = match Lazy.force x with
+  let rec force x f = force' (Lazy.force x) f
+  and force' x f = match x with
     | Depends { eqn; yes; no } ->
         Depends { eqn; yes = lazy (force yes f); no = lazy (force no f) }
     | x -> f x
 
+  let rec type_of_ne : 'n. 'n dne -> 'n d = function
+    | DVar(_, ty) -> Lazy.force ty
+    | DComp { t; ty } ->
+        failwith "TODO"
+    | DApp(f, arg) ->
+        force' (type_of_ne f) (function
+          | DPi { b } -> b Sub.id arg
+          | _ -> failwith "unreachable: internal type error")
+    | DFst x ->
+        force' (type_of_ne x) (function
+          | DSigma { a } -> Lazy.force a
+          | _ -> failwith "unreachable: internal type error")
+    | DSnd x ->
+        force' (type_of_ne x) (function
+          | DSigma { b } -> b Sub.id (lazy (DNe (DFst x)))
+          | _ -> failwith "unreachable: internal type error")
+    | DDimApp(p, _) ->
+        force' (type_of_ne p) (function
+          | DPathTy(a, _, _) -> Lazy.force a
+          | _ -> failwith "unreachable: internal type error")
+    | DUnglue _ ->
+        (* I probably need to add b as an implicit argument to unglue *)
+        failwith "TODO"
+
   let app f x = force f (function
     (* β rule: (λ x. f(x)) x ≡ f(x) *)
     | DLam { f } -> f Sub.id x
+    | DNe ne -> DNe (DApp(ne, x))
     | _ -> failwith "unreachable: internal type error")
 
   let fst x = force x (function
     (* β rule: fst (a, b) ≡ a *)
     | DPair(a, _) -> Lazy.force a
+    | DNe ne -> DNe (DFst ne)
     | _ -> failwith "unreachable: internal type error")
   let snd x = force x (function
     (* β rule: snd (a, b) ≡ b *)
     | DPair(_, b) -> Lazy.force b
+    | DNe ne -> DNe (DSnd ne)
     | _ -> failwith "unreachable: internal type error")
 
   let rec un_dim_abs tm = match Lazy.force tm with
@@ -336,6 +364,10 @@ end = struct
                 ; yes = lazy (un_dim_abs yes)
                 ; no  = lazy (un_dim_abs no) }
     | DDimAbs(_, p) -> Lazy.force p
+    | DNe ne ->
+        (* TODO: I think here is probably the right place to handle the path
+           cube rules? *)
+        failwith "TODO"
     | _ -> failwith "unreachable: internal type error: should'a been a path"
 
   let dim_app p d = subst (Sub.app d) (lazy (un_dim_abs p))
@@ -366,67 +398,8 @@ end = struct
     | [] -> force x (function
       (* β rule: unglue (glue [α ↦ a] (b)) ≡ b *)
       | DGlueTerm { a = _; b } -> Lazy.force b
+      | DNe ne -> failwith "TODO"
       | _ -> failwith "unreachable: internal type error")
-
-  (* Type-directed reification *)
-  let rec reify : 'n. 'n dl -> 'n dne -> 'n d = fun ty tm ->
-    match Lazy.force ty with
-    | Depends { eqn; yes; no } ->
-        Depends { eqn = eqn
-                ; yes = lazy (reify yes tm)
-                ; no  = lazy (reify no  tm) }
-    | DNe _ -> DNe tm
-    | DPi { name; a; b } ->
-        (* η rule: f = λ x. f x *)
-        let name = if name = "_" then "x" else name in
-        DLam { name
-             ; f = fun r x -> reify (lazy (b r x)) (DApp(subst_ne r tm, x)) }
-    | DSigma { name; a; b } ->
-        (* η rule: p ≡ (fst(p), snd(p)) *)
-        let fst = lazy (reify a (DFst tm)) in
-        DPair(fst, lazy (reify (lazy (b Sub.id fst)) (DSnd tm)))
-    | DPathTy(a, lhs, rhs) ->
-        (* η rule: p ≡ <i> p @ i *)
-        DDimAbs("i", lazy begin
-          (* Cube rule: p @ i0 ≡ lhs; p @ i1 ≡ rhs *)
-          let dim = DimVar 0 in
-          let a = lazy (subst Sub.shift_up a) in
-          let lhs = lazy (subst Sub.shift_up lhs) in
-          let rhs = lazy (subst Sub.shift_up rhs) in
-          let tm = subst_ne Sub.shift_up tm in
-          Depends
-            { eqn = dim, Zero
-            ; yes = lhs
-            ; no  = lazy (Depends
-                { eqn = dim, One
-                ; yes = rhs
-                ; no  = lazy (reify a (DDimApp(tm, dim))) }) }
-        end)
-    | DU _ -> DNe tm
-    | DGlueType { b; t_e } ->
-        (* η rule: g ≡ glue [α ↦ g] (unglue [α ↦ T,e] g) *)
-        let partial_g = List.map (fun (i, j, t_e) ->
-          (i, j, lazy (reify (lazy (fst t_e)) tm))) t_e in
-
-        (* Cube rule: α ⊢ unglue [α ↦ T,(f,pf)] g ≡ f(g) *)
-        let unglue_tm =
-          List.fold_right2
-            (fun (i, j, t_f_pf) (i', j', g) r ->
-              assert (i = i' && j = j');
-              let f = lazy (fst (lazy (snd t_f_pf))) in
-              lazy (Depends
-                { eqn = i, j
-                ; yes = lazy (app f g)
-                ; no  = r }))
-            t_e partial_g (lazy (reify b (DUnglue(t_e, tm)))) in
-
-        glue_term partial_g unglue_tm
-
-    | DLam _ | DPair _ | DDimAbs _ | DGlueTerm _ ->
-        (* Even though glue(...) could sometimes be a type via the cube rules,
-           it gets evaluated to Depends(α, ty, DGlueTerm _), so DGlueTerm only
-           shows up when α is false and it's for sure not a type. *)
-        failwith "unreachable: not a type"
 
   let lookup_tm : 'n. idx -> 'n env -> 'n d =
     let rec go : 'm. ('m, 'n) sub -> idx -> 'm env -> 'n d = fun r i e ->
@@ -491,7 +464,6 @@ end = struct
     | PathTy(a, lhs, rhs) ->
         DPathTy(lazy (eval env a), lazy (eval env lhs), lazy (eval env rhs))
     | DimAbs(n, tm) ->
-        (* No need to handle cube rules here; it's handled in reify *)
         let env' = EDim(ESub(env, Sub.shift_up), DimVar 0) in
         DDimAbs(n, lazy (eval env' tm))
     | DimApp(p, d) ->
@@ -651,6 +623,7 @@ module Ctx : sig
   val lvl : 'n t -> lvl
   val env : 'n t -> 'n env
   val names : 'n t -> name list
+  val force : 'n t -> 'n dl -> 'n d
   val lookup_var : 'n t -> name -> idx * 'n dl
   val lookup_dim : 'n t -> name -> idx
   val with_defn : 'n t -> name -> 'n dl -> 'n dl -> 'n t
@@ -737,7 +710,7 @@ end = struct
     ; formula = ctx.formula }
 
   let with_var (ctx : 'n t) name ty =
-    let x = lazy (Eval.reify ty (DVar ctx.lvl)) in
+    let x = lazy (DNe (DVar(ctx.lvl, ty))) in
     x, with_defn ctx name ty x
 
   let with_dim_var (ctx : 'n t) name =
@@ -757,6 +730,11 @@ end = struct
 
   let entails (ctx : 'n t) (x, y) =
     find ctx x = find ctx y
+
+  let rec force (ctx : 'n t) tm = match Lazy.force tm with
+    | Depends { eqn; yes; no } ->
+        if entails ctx eqn then force ctx yes else force ctx no
+    | x -> x
 
   let are_cofibs_equal (ctx : 'n t) a b =
     (* TODO: make sure this does the right thing *)
@@ -795,11 +773,100 @@ end = struct
   exception NotEqual
   exception Mismatch of string * string
 
-  (* TODO: conversion checking *)
   let rec conv : 'n. 'n Ctx.t -> 'n dl -> 'n dl -> 'n dl -> unit =
-    fun ctx ty a b ->
-    failwith "TODO"
+    fun ctx ty x y -> match Ctx.force ctx ty with
+    | DNe ne -> begin
+        match Ctx.force ctx x, Ctx.force ctx y with
+        | DNe x, DNe y -> let _ = conv_ne ctx x y in ()
+        | _ -> failwith "unreachable: internal type error"
+        end
+    | DPi { name; a; b } ->
+        (* η rule: f ≡ λ x. f x *)
+        let v, ctx' = Ctx.with_var ctx name a in
+        let ty' = lazy (b Sub.id v) in
+        conv ctx' ty' (lazy (Eval.app x v)) (lazy (Eval.app y v))
+    | DSigma { a; b } ->
+        (* η rule: x ≡ (fst x, snd x) *)
+        let fst_x = lazy (Eval.fst x) in
+        conv ctx a fst_x (lazy (Eval.fst y));
+        let snd_ty = lazy (b Sub.id fst_x) in
+        conv ctx snd_ty (lazy (Eval.snd x)) (lazy (Eval.snd y))
+    | DPathTy(a, _, _) ->
+        (* η rule: p ≡ <i> p @ i *)
+        let i, ctx' = Ctx.with_dim_var ctx "i" in
+        let ty' = lazy (subst Sub.shift_up a) in
+        conv ctx' ty' (lazy (Eval.un_dim_abs x)) (lazy (Eval.un_dim_abs y))
+    | DGlueType { b; t_e } ->
+        (* η rule: g ≡ glue [α ↦ g] (unglue g) *)
+        (* honestly this η rule is kinda confusing but if unglue x = unglue y
+           then they kinda gotta be equal *)
+        conv ctx b (lazy (Eval.unglue t_e x)) (lazy (Eval.unglue t_e y))
+    | DU i -> begin
+        match Ctx.force ctx x, Ctx.force ctx y with
+        | _ -> failwith "TODO"
+        end
+    | _ -> failwith "internal type error: not a type"
 
+  (* Conversion checking for neutrals returns the type *)
+  and conv_ne : 'n. 'n Ctx.t -> 'n dne -> 'n dne -> 'n dl =
+    fun ctx x y -> match x, y with
+    | DVar(vx, t), DVar(vy, _) when vx = vy -> t
+    | DComp { z; s = sx; t = tx; ty = ty_x
+            ; partial = partial_x; cap = cap_x }
+    , DComp { s = sy; t = ty; ty = ty_y
+            ; partial = partial_y; cap = cap_y }
+      when sx = sy && tx = ty ->
+        begin
+          (* Types have to be the same *)
+          let _ = conv_ne (snd (Ctx.with_dim_var ctx z)) ty_x ty_y in
+          let ty = lazy (DNe ty_x) in
+          (* Extent of partial elements has to be the same *)
+          let alpha_x = List.map (fun (i,j,_) -> i,j) partial_x in
+          let alpha_y = List.map (fun (i,j,_) -> i,j) partial_y in
+          if not (Ctx.are_cofibs_equal ctx alpha_x alpha_y) then
+            raise NotEqual;
+          (* Partial elements have to be the same *)
+          List.iter (fun (i, j, x) ->
+            match Ctx.with_eqn ctx (i, j) with
+            | None -> ()
+            | Some ctx' -> List.iter (fun (i', j', y) ->
+                match Ctx.with_eqn ctx' (i', j') with
+                | None -> ()
+                | Some ctx'' ->
+                    conv (snd (Ctx.with_dim_var ctx'' z)) ty x y) partial_y)
+            partial_x;
+          (* Caps have to be the same *)
+          conv ctx (lazy (subst (Sub.app sx) ty)) cap_x cap_y;
+          lazy (subst (Sub.app tx) ty)
+        end
+    | DApp(fa, xa), DApp(fb, xb) -> begin
+        match Ctx.force ctx (conv_ne ctx fa fb) with
+          | DPi { a; b } ->
+              conv ctx a xa xb; lazy (b Sub.id xa)
+          | _ -> failwith "unreachable: internal type error"
+        end
+    | DFst x, DFst y -> begin
+        match Ctx.force ctx (conv_ne ctx x y) with
+          | DSigma { a } -> a
+          | _ -> failwith "unreachable: internal type error"
+        end
+    | DSnd x, DSnd y -> begin
+        match Ctx.force ctx (conv_ne ctx x y) with
+          | DSigma { b } -> lazy (b Sub.id (lazy (DNe x)))
+          | _ -> failwith "unreachable: internal type error"
+        end
+    | DDimApp(pa, dim_a), DDimApp(pb, dim_b)
+      when Ctx.entails ctx (dim_a, dim_b) -> begin
+        (* Cube rules should have already been dealt with *)
+        assert (not (List.exists (Ctx.entails ctx)
+          [dim_a, Zero; dim_a, One; dim_b, Zero; dim_b, One]));
+        match Ctx.force ctx (conv_ne ctx pa pb) with
+          | DPathTy(ty, _, _) -> ty
+          | _ -> failwith "unreachable: internal type error"
+        end
+    | DUnglue _, DUnglue _ ->
+        failwith "TODO"
+    | _ -> raise NotEqual
 
   let eq ctx ty a b =
     try conv ctx ty a b
@@ -853,7 +920,7 @@ end
 (*
 Where the Cube Rules run (note: perfectly safe for β rules to take precedence):
   - Kan composition: in eval for comp at a neutral type
-  - paths: in reification at path type
+  - paths: in eval for path application, by synthesizing the type of the term
   - Glue type: in eval for Glue
   - glue term: in eval for glue
   - unglue term: in eval for unglue of a neutral term
