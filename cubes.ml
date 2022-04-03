@@ -310,6 +310,11 @@ module Eval : sig
   val unglue : ('n dl, 'n) partial -> 'n dl -> 'n d
 
   val eval : 'n env -> Core.tm -> 'n d
+
+  val is_contr : 'n dl -> 'n d
+  val fiber : 'n dl -> 'n dl -> 'n dl -> 'n dl -> 'n d
+  val is_equiv : 'n dl -> 'n dl -> 'n dl -> 'n d
+  val thing_glue_needs : int -> 'n dl -> 'n d
 end = struct
   open Domain
 
@@ -637,6 +642,58 @@ end = struct
   and coe
     : 'n. 'n s dl -> 'n dim -> 'n dim -> 'n dl -> 'n d
     = fun ty s t cap -> comp ty s t [] cap
+
+  (* is-contr A = Σx:A. Πy:A. x≡y *)
+  and is_contr : 'n. 'n dl -> 'n d = fun ty ->
+    DSigma
+      { name = "x"
+      ; a = ty
+      ; b = fun s x ->
+        let ty = lazy (subst s ty) in
+        DPi
+          { name = "y"
+          ; a = ty
+          ; b = fun s' y ->
+            let ty = lazy (subst s' ty) in
+            let x = lazy (subst s' x) in
+            DPathTy(ty, x, y) } }
+
+  (* fiber A B f y = Σx:A. f(x) ≡ y *)
+  and fiber : 'n. 'n dl -> 'n dl -> 'n dl -> 'n dl -> 'n d = fun a b f y ->
+    DSigma
+      { name = "x"
+      ; a = a
+      ; b = fun s x ->
+        let b = lazy (subst s b) in
+        let f = lazy (subst s f) in
+        let y = lazy (subst s y) in
+        DPathTy(b, lazy (app f x), y) }
+
+  (* is-equiv A B f = Πy:B. is-contr (fiber A B f y) *)
+  and is_equiv : 'n. 'n dl -> 'n dl -> 'n dl -> 'n d = fun a b f ->
+    DPi
+      { name = "y"
+      ; a = b
+      ; b = fun s y ->
+        let a = lazy (subst s a) in
+        let b = lazy (subst s b) in
+        let f = lazy (subst s f) in
+        is_contr (lazy (fiber a b f y)) }
+
+  (* thing-Glue-needs i B = ΣA:U_i. Σf:A→B. is-equiv A B f *)
+  and thing_glue_needs : 'n. int -> 'n dl -> 'n d = fun univ_lvl b ->
+    DSigma
+      { name = "A"
+      ; a = lazy (DU univ_lvl)
+      ; b = fun s a ->
+        DSigma
+          { name = "f"
+          ; a = lazy (DPi
+            { name = "_"; a = a; b = fun s' _ -> subst (Sub.compose s' s) b })
+          ; b = fun s' f ->
+            let a = lazy (subst s' a) in
+            let b = lazy (subst (Sub.compose s' s) b) in
+            is_equiv a b f } }
 end
 
 module Ctx : sig
@@ -837,7 +894,26 @@ end = struct
         conv ctx b (lazy (Eval.unglue t_e x)) (lazy (Eval.unglue t_e y))
     | DU i -> begin
         match Ctx.force ctx x, Ctx.force ctx y with
-        | _ -> failwith "TODO"
+        | DNe ne_x, DNe ne_y ->
+            let _ = conv_ne ctx ne_x ne_y in ()
+        | DPi { name; a = ax; b = bx }, DPi { a = ay; b = by } ->
+            conv ctx ty ax ay;
+            let v, ctx' = Ctx.with_var ctx name ax in
+            conv ctx' ty (lazy (bx Sub.id v)) (lazy (by Sub.id v))
+        | DSigma { name; a = ax; b = bx }, DSigma { a = ay; b = by } ->
+            conv ctx ty ax ay;
+            let v, ctx' = Ctx.with_var ctx name ax in
+            conv ctx' ty (lazy (bx Sub.id v)) (lazy (by Sub.id v))
+        | DPathTy(ax, lhs_x, rhs_x), DPathTy(ay, lhs_y, rhs_y) ->
+            conv ctx ty ax ay;
+            conv ctx ax lhs_x rhs_y;
+            conv ctx ax rhs_x rhs_y
+        | DU ix, DU iy when ix = iy -> ()
+        | DGlueType { b = bx; t_e = te_x }, DGlueType { b = by; t_e = te_y } ->
+            conv ctx ty bx by;
+            let ty' = lazy (Eval.thing_glue_needs i bx) in
+            conv_partial ctx Fun.id ty' te_x te_y
+        | _ -> raise NotEqual
         end
     | _ -> failwith "internal type error: not a type"
 
@@ -854,21 +930,9 @@ end = struct
           (* Types have to be the same *)
           let _ = conv_ne (snd (Ctx.with_dim_var ctx z)) ty_x ty_y in
           let ty = lazy (DNe ty_x) in
-          (* Extent of partial elements has to be the same *)
-          let alpha_x = List.map (fun (i,j,_) -> i,j) partial_x in
-          let alpha_y = List.map (fun (i,j,_) -> i,j) partial_y in
-          if not (Ctx.are_cofibs_equal ctx alpha_x alpha_y) then
-            raise NotEqual;
           (* Partial elements have to be the same *)
-          List.iter (fun (i, j, x) ->
-            match Ctx.with_eqn ctx (i, j) with
-            | None -> ()
-            | Some ctx' -> List.iter (fun (i', j', y) ->
-                match Ctx.with_eqn ctx' (i', j') with
-                | None -> ()
-                | Some ctx'' ->
-                    conv (snd (Ctx.with_dim_var ctx'' z)) ty x y) partial_y)
-            partial_x;
+          conv_partial ctx
+            (fun c -> snd (Ctx.with_dim_var c z)) ty partial_x partial_y;
           (* Caps have to be the same *)
           conv ctx (lazy (subst (Sub.app sx) ty)) cap_x cap_y;
           lazy (subst (Sub.app tx) ty)
@@ -902,6 +966,26 @@ end = struct
         failwith "TODO"
     | _ -> raise NotEqual
 
+  and conv_partial
+    : 'n 'm. 'n Ctx.t -> ('n Ctx.t -> 'm Ctx.t) -> 'm dl
+    -> ('m dl, 'n) partial -> ('m dl, 'n) partial -> unit
+    = fun ctx adj ty x y ->
+      (* Domain has to be the same *)
+      let alpha_x = List.map (fun (i,j,_) -> i,j) x in
+      let alpha_y = List.map (fun (i,j,_) -> i,j) y in
+      if not (Ctx.are_cofibs_equal ctx alpha_x alpha_y) then
+        raise NotEqual;
+      (* Values have to be the same *)
+      List.iter (fun (i, j, x) ->
+        match Ctx.with_eqn ctx (i, j) with
+        | None -> ()
+        | Some ctx' -> List.iter (fun (i', j', y) ->
+            match Ctx.with_eqn ctx' (i', j') with
+            | None -> ()
+            | Some ctx'' ->
+                conv (adj ctx'') ty x y) y)
+        x
+
   let eq ctx ty a b =
     try conv ctx ty a b
     with NotEqual ->
@@ -928,22 +1012,15 @@ end
 (* 
   Why are disjunctions in trivial cofibrations a thing anyways?
   What are they for?
-  Why merge partial elements?
   Like, ok, in some context Ψ;φ;Γ,
 
   [ (i=0)∨(i=1) ↦   something with p @ i ]
 
   now there's just like, two completely different values being packed into one
   is there any time I couldn't just
-    [ (i=0) ↦  something with p @ 0
-    | (i=1) ↦  something with p @ 1 ] ?
-  If not I really wanna straight up do away with all the disjunctions and have a
-  cube formula of ONLY EQUATIONS (the joy!)
-  Other things that would improve from a cube formula of ONLY EQUATIONS:
-    - Maintain it as a union-find datastructure, use the functional Map module
-    - Discover conflicts when they arise; no need to ask for consistency checks
-      on every function
-    - Really efficient cofibration entailment
+    [ (i=0) ↦  something with p @ i
+    | (i=1) ↦  something with p @ i ] ?
+  Answer: no. Do the syntactic simplification!
 
   Need to figure out how quantifier elimination works
 *)
@@ -954,14 +1031,25 @@ end
 (*
 Where the Cube Rules run (note: perfectly safe for β rules to take precedence):
   - Kan composition: in eval for comp at a neutral type
-  - paths: in eval for path application, by synthesizing the type of the term
+  - paths: in eval for path application at a neutral path, by synthesizing the
+    type of the term
   - Glue type: in eval for Glue
   - glue term: in eval for glue
-  - unglue term: in eval for unglue of a neutral term
+  - unglue: in eval for unglue of a neutral term
 *)
 
-(* TODO: add ⊤/⊥ types, tt : ⊤, abort : ∀ A → ⊥ → A *)
+(* immediately actionable items:
+  - fixing the context
+  - figuring out the unglue neutral form
+  - tackle Kan composition for universes
+  - pretty-printing
+  - read "on HITs in CuTT" to see how best to introduce Bool, Nat, S¹
+*)
 
-(* Hmmmm, should I make path be pathp, or keep it as path? *)
-
-
+(* eventual improvements:
+  - make substitutions not horribly slow
+  - add ⊤/⊥ types, tt : ⊤, abort : ∀ A → ⊥ → A
+  - add Bool, Nat, their eliminators
+  - handle universes in a more sane way -- typical ambiguity plus a solver?
+  - consider changing path to pathp
+ *)
