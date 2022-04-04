@@ -32,6 +32,7 @@ module AST = struct
     | U of int
     | GlueType of { b: ty; t_e: partial }
     | GlueTerm of { a: partial; b: exp }
+    (* TODO: are all of these implicit arguments needed in the source code? *)
     | Unglue of { b: ty; t_e: partial; x: exp }
   and partial = (dim * dim * exp) list
   and dim = Zero | DimVar of name | One
@@ -209,7 +210,7 @@ module Domain = struct
     (* Path *)
     | DDimApp of 'n dne * 'n dim
     (* Universes *)
-    | DUnglue of ('n dl, 'n) partial * 'n dne
+    | DUnglue of 'n dne
 
   (* CHECK: subst id = id
             subst f ∘ subst g = subst (f ∘ g)
@@ -271,11 +272,8 @@ module Domain = struct
         DSnd (subst_ne r x)
     | DDimApp(p, d) ->
         DDimApp(subst_ne r p, subst_dim r d)
-    | DUnglue(t_e, g) ->
-        let t_e = List.map (fun (i, j, t) ->
-          (subst_dim r i, subst_dim r j, lazy (subst r t))) t_e in
-        let g = subst_ne r g in
-        DUnglue(t_e, g)
+    | DUnglue g ->
+        DUnglue (subst_ne r g)
 
   type 'n env =
     | ENil : 'n env
@@ -314,7 +312,7 @@ module Eval : sig
   val is_contr : 'n dl -> 'n d
   val fiber : 'n dl -> 'n dl -> 'n dl -> 'n dl -> 'n d
   val is_equiv : 'n dl -> 'n dl -> 'n dl -> 'n d
-  val thing_glue_needs : int -> 'n dl -> 'n d
+  val type_of_Glue_arg : int -> 'n dl -> 'n d
 end = struct
   open Domain
 
@@ -345,9 +343,10 @@ end = struct
         force' (type_of_ne p) (function
           | DPathTy(a, _, _) -> Lazy.force a
           | _ -> failwith "unreachable: internal type error")
-    | DUnglue _ ->
-        (* I probably need to add b as an implicit argument to unglue *)
-        failwith "TODO"
+    | DUnglue g ->
+        force' (type_of_ne g) (function
+          | DGlueType { b } -> Lazy.force b
+          | _ -> failwith "unreachable: internal type error")
 
   let app f x = force f (function
     (* β rule: (λ x. f(x)) x ≡ f(x) *)
@@ -422,7 +421,7 @@ end = struct
     | [] -> force x (function
       (* β rule: unglue (glue [α ↦ a] (b)) ≡ b *)
       | DGlueTerm { a = _; b } -> Lazy.force b
-      | DNe ne -> failwith "TODO"
+      | DNe ne -> DNe (DUnglue ne)
       | _ -> failwith "unreachable: internal type error")
 
   let lookup_tm : 'n. idx -> 'n env -> 'n d =
@@ -680,8 +679,8 @@ end = struct
         let f = lazy (subst s f) in
         is_contr (lazy (fiber a b f y)) }
 
-  (* thing-Glue-needs i B = ΣA:U_i. Σf:A→B. is-equiv A B f *)
-  and thing_glue_needs : 'n. int -> 'n dl -> 'n d = fun univ_lvl b ->
+  (* type-of-Glue-arg i B = ΣA:U_i. Σf:A→B. is-equiv A B f *)
+  and type_of_Glue_arg : 'n. int -> 'n dl -> 'n d = fun univ_lvl b ->
     DSigma
       { name = "A"
       ; a = lazy (DU univ_lvl)
@@ -695,7 +694,6 @@ end = struct
             let b = lazy (subst (Sub.compose s' s) b) in
             is_equiv a b f } }
 
-  (* TODO: check that this is correct *)
   (* id-is-equiv A : is-equiv id
      id-is-equiv A y .fst = (y, refl)   (* the fiber *)
      id-is-equiv A y .snd (x, p) @i =
@@ -758,9 +756,14 @@ module Ctx : sig
 
   val initial_ctx : z t
 
+  (* the number of variables in the term context Γ, and their names *)
   val lvl : 'n t -> lvl
+  val tm_names : 'n t -> name list
+
+  (* there are 'n dimension variables, and these are their names *)
+  val dim_names : 'n t -> name list
+
   val env : 'n t -> 'n env
-  val names : 'n t -> name list
   val force : 'n t -> 'n dl -> 'n d
   val lookup_var : 'n t -> name -> idx * 'n dl
   val lookup_dim : 'n t -> name -> idx
@@ -791,11 +794,8 @@ end = struct
   type 'n t =
     { n_dim_vars : int
     ; lvl : lvl
-    (* heck *)
-    (* TODO: make lvl be only for term variables
-       separate the term variable names from dimension variable names
-       *)
-    ; names : name list
+    ; tm_names : name list
+    ; dim_names : name list
     ; tys : 'n tys
     ; env : 'n env
     ; formula : formula }
@@ -817,14 +817,16 @@ end = struct
   let initial_ctx: z t =
     { n_dim_vars = 0
     ; lvl = 0
-    ; names = []
+    ; tm_names = []
+    ; dim_names = []
     ; tys = TNil
     ; env = ENil
     ; formula = IntMap.empty }
 
   let lvl (ctx : 'n t) = ctx.lvl
   let env (ctx : 'n t) = ctx.env
-  let names (ctx : 'n t) = ctx.names
+  let tm_names (ctx : 'n t) = ctx.tm_names
+  let dim_names (ctx : 'n t) = ctx.dim_names
 
   let lookup_var (ctx : 'n t) name = 
     let rec go : 'm. int -> ('m, 'n) sub -> 'm tys -> _ =
@@ -848,7 +850,8 @@ end = struct
   let with_defn (ctx : 'n t) name ty x =
     { n_dim_vars = ctx.n_dim_vars
     ; lvl = ctx.lvl + 1
-    ; names = name :: ctx.names
+    ; tm_names = name :: ctx.tm_names
+    ; dim_names = ctx.dim_names
     ; tys = TVal(ctx.tys, ty, name)
     ; env = EVal(ctx.env, x)
     ; formula = ctx.formula }
@@ -862,7 +865,8 @@ end = struct
     x,
     { n_dim_vars = ctx.n_dim_vars + 1
     ; lvl = ctx.lvl + 1
-    ; names = name :: ctx.names
+    ; tm_names = ctx.tm_names
+    ; dim_names = name :: ctx.dim_names
     ; tys = TDim(tsub ctx.tys Sub.shift_up, name)
     ; env = EDim(esub ctx.env Sub.shift_up, x)
     ; formula = ctx.formula }
@@ -964,7 +968,7 @@ end = struct
         | DU ix, DU iy when ix = iy -> ()
         | DGlueType { b = bx; t_e = te_x }, DGlueType { b = by; t_e = te_y } ->
             conv ctx ty bx by;
-            let ty' = lazy (Eval.thing_glue_needs i bx) in
+            let ty' = lazy (Eval.type_of_Glue_arg i bx) in
             conv_partial ctx Fun.id ty' te_x te_y
         | _ -> raise NotEqual
         end
@@ -1015,8 +1019,12 @@ end = struct
           | DPathTy(ty, _, _) -> ty
           | _ -> failwith "unreachable: internal type error"
         end
-    | DUnglue _, DUnglue _ ->
-        failwith "TODO"
+    | DUnglue g_a, DUnglue g_b -> begin
+        (* the t_e's better be equal for this to be well-typed *)
+        match Ctx.force ctx (conv_ne ctx g_a g_b) with
+          | DGlueType { b } -> b
+          | _ -> failwith "unreachable: internal type error"
+        end
     | _ -> raise NotEqual
 
   and conv_partial
@@ -1092,8 +1100,6 @@ Where the Cube Rules run (note: perfectly safe for β rules to take precedence):
 *)
 
 (* immediately actionable items:
-  - fixing the context
-  - figuring out the unglue neutral form
   - tackle Kan composition for universes and Glue
   - pretty-printing
   - read "on HITs in CuTT" to see how best to introduce Bool, Nat, S¹
