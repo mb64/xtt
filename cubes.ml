@@ -694,6 +694,59 @@ end = struct
             let a = lazy (subst s' a) in
             let b = lazy (subst (Sub.compose s' s) b) in
             is_equiv a b f } }
+
+  (* TODO: check that this is correct *)
+  (* id-is-equiv A : is-equiv id
+     id-is-equiv A y .fst = (y, refl)   (* the fiber *)
+     id-is-equiv A y .snd (x, p) @i =
+       ( comp z. A [1-0]
+          [ (i=0) ↦ y
+          | (i=1) ↦ p @ z
+          ] (y)
+       , <j> fill z. A [1-j]
+              [ (i=0) ↦ y
+              | (i=1) ↦ p @ z
+              ] (y)
+       )
+
+    ↑       y———y
+    j       | ⇓ |p
+    +–i–→   y---x
+  *)
+  and id_is_equiv : 'n. 'n dl -> 'n d = fun a ->
+    (* TODO: check that this correctly implements the above *)
+    DLam
+      { name = "y"
+      ; f = fun s y ->
+        let a = lazy (subst s a) in
+        let refl_y = DDimAbs("i", lazy (subst Sub.shift_up y)) in
+        let fib = DPair(y, lazy refl_y) in
+        let pf = DLam
+          { name = "other_fib"
+          ; f = fun s other_fib ->
+            let a, y = lazy (subst s a), lazy (subst s y) in
+            let p = lazy (snd other_fib) in
+            DDimAbs("i", lazy (
+              let shift_up v = lazy (subst Sub.shift_up v) in
+              let a, y, p = shift_up a, shift_up y, shift_up p in
+              DPair
+              ( lazy (comp (shift_up a) One Zero
+                  [ DimVar 0, Zero, shift_up y
+                  ; DimVar 0, One, lazy (un_dim_abs p)
+                  ] y
+                )
+              , lazy (DDimAbs("j", lazy (
+                  let a, y, p = shift_up a, shift_up y, shift_up p in
+                  fill (shift_up a) Zero (DimVar 0)
+                    [ DimVar 1, Zero, shift_up y
+                    ; DimVar 1, Zero, lazy (un_dim_abs p)
+                    ] y
+                )))
+              )
+            ))
+          } in
+        DPair(lazy fib, lazy pf)
+      }
 end
 
 module Ctx : sig
@@ -1041,7 +1094,7 @@ Where the Cube Rules run (note: perfectly safe for β rules to take precedence):
 (* immediately actionable items:
   - fixing the context
   - figuring out the unglue neutral form
-  - tackle Kan composition for universes
+  - tackle Kan composition for universes and Glue
   - pretty-printing
   - read "on HITs in CuTT" to see how best to introduce Bool, Nat, S¹
 *)
