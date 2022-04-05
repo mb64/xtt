@@ -618,8 +618,30 @@ end = struct
 
         DDimAbs("i", lazy (comp new_ty s t new_partial new_cap))
 
-    | DU univ_idx -> (* oh no *)
-        failwith "TODO"
+    | DU univ_idx ->
+        (* TODO: check that this is correct *)
+        let mk_equiv t f is_equiv =
+          lazy (DPair(t, lazy (DPair(f, is_equiv)))) in
+        let id_equiv =
+          let id_fun =
+            lazy (DLam { name = "x"; f = fun _ x -> Lazy.force x }) in
+          mk_equiv cap id_fun (lazy (id_is_equiv cap)) in
+        let t_for_z : ('n s, 'n) sub = Sub.app t in
+        let coe_equiv (i, j, a) =
+          let a' = lazy (subst t_for_z a) in
+          let coe_fun = lazy
+            (DLam
+              { name = "x"
+              ; f = fun sub x ->
+                let a = lazy (subst (Sub.extend sub) a) in
+                let s, t = subst_dim sub s, subst_dim sub t in
+                coe a t s x
+              }) in
+          i, j, mk_equiv a' coe_fun (lazy (coe_is_equiv a t s)) in
+        DGlueType
+          { t_e = (s, t, id_equiv) :: List.map coe_equiv partial
+          ; b = cap }
+
     | DGlueType { b; t_e } -> (* oh no *)
         failwith "TODO"
 
@@ -745,6 +767,26 @@ end = struct
           } in
         DPair(lazy fib, lazy pf)
       }
+
+  (* coe-is-equiv A s t : is-equiv (λ x. coe z. A [s-t] (x))
+     coe-is-equiv A s t =
+       coe z'. (is-equiv (λ x. coe z. A [s-z'] (x))) [s-t] (id-is-equiv A[s/z])
+  *)
+  and coe_is_equiv : 'n. 'n s dl -> 'n dim -> 'n dim -> 'n d =
+    fun a s t ->
+    let ty: 'n s dl = lazy (is_equiv a a (lazy
+      (DLam
+      { name = "x"
+      ; f = fun sub x ->
+        (* sub : ψ,z' → ?? *)
+        (* sub ∘ shift_up : Ψ → ?? *)
+        (* extend (sub ∘ shift_up) : ψ,z → ??,z *)
+        let a = lazy (subst Sub.(extend (compose sub shift_up)) a) in
+        let s = subst_dim Sub.(compose sub shift_up) s in
+        let z' = DimVar 0 in
+        coe a s z' x }))) in
+    let cap: 'n dl = lazy (id_is_equiv (lazy (subst (Sub.app s) a))) in
+    coe ty s t cap
 end
 
 module Ctx : sig
@@ -1100,7 +1142,7 @@ Where the Cube Rules run (note: perfectly safe for β rules to take precedence):
 *)
 
 (* immediately actionable items:
-  - tackle Kan composition for universes and Glue
+  - tackle Kan composition for Glue
   - pretty-printing
   - read "on HITs in CuTT" to see how best to introduce Bool, Nat, S¹
 *)
