@@ -1,7 +1,6 @@
 (* ABCFHL cartesian cubical type theory, more or less *)
 
-type name = string
-type lvl = int and idx = int
+open Extra
 
 module AST = struct
   type ty = exp
@@ -28,8 +27,8 @@ module AST = struct
     | PathTy of ty * exp * exp
     | PathTm of name * exp
     | DimApp of exp * dim
-    (* Universes: U_i, Glue B [α ↦ T,e], glue [α ↦ t] b, unglue B [α ↦ T,e] x *)
-    | U of int
+    (* Universes: U, Glue B [α ↦ T,e], glue [α ↦ t] b, unglue B [α ↦ T,e] x *)
+    | U
     | GlueType of { b: ty; t_e: partial }
     | GlueTerm of { a: partial; b: exp }
     (* TODO: are all of these implicit arguments needed in the source code? *)
@@ -67,7 +66,7 @@ module Core = struct
     | DimAbs of name * tm binds_a_dim
     | DimApp of tm * dim
     (* Universes *)
-    | U of int
+    | U of univ
     | GlueType of { b: ty; t_e: tm partial }
     | GlueTerm of { a: tm partial; b: tm }
     | Unglue of { t_e: tm partial; x: tm }
@@ -121,13 +120,6 @@ module Domain = struct
   so this makes d, dne exactly presheaves on the Cartesian cube category!
 
   *)
-
-  module TypeNats : sig
-    (* Abstract types used to index things by the length of the context *)
-    type z
-    type 'a s
-  end = struct type z = Z and 'a s = S end
-  include TypeNats
 
   type 'n dim = Zero | DimVar of idx (*n*) | One
   type 'n eqn = 'n dim * 'n dim
@@ -188,7 +180,7 @@ module Domain = struct
     | DPathTy of 'n dl * 'n dl * 'n dl
     | DDimAbs of name * 'n s dl (* binds a dimension! *)
     (* Universes *)
-    | DU of int
+    | DU of univ
     | DGlueType of { b: 'n dl; t_e: ('n dl, 'n) partial }
     | DGlueTerm of { a: ('n dl, 'n) partial; b: 'n dl }
   and 'n dne =
@@ -239,8 +231,8 @@ module Domain = struct
         DPathTy(lazy (subst r a), lazy (subst r lhs), lazy (subst r rhs))
     | DDimAbs(name, p) ->
         DDimAbs(name, lazy (subst (extend r) p))
-    | DU i ->
-        DU i
+    | DU u ->
+        DU u
     | DGlueType { b; t_e } ->
         let b = lazy (subst r b) in
         let t_e = List.map (fun (i, j, t) ->
@@ -312,7 +304,7 @@ module Eval : sig
   val is_contr : 'n dl -> 'n d
   val fiber : 'n dl -> 'n dl -> 'n dl -> 'n dl -> 'n d
   val is_equiv : 'n dl -> 'n dl -> 'n dl -> 'n d
-  val type_of_Glue_arg : int -> 'n dl -> 'n d
+  val type_of_Glue_arg : univ -> 'n dl -> 'n d
 end = struct
   open Domain
 
@@ -325,19 +317,19 @@ end = struct
 
   let rec type_of_ne : 'n. 'n dne -> 'n d = function
     | DVar(_, ty) -> Lazy.force ty
-    | DComp { t; ty } ->
+    | DComp { t; ty; _ } ->
         DNe (subst_ne (Sub.app t) ty)
     | DApp(f, arg) ->
         force' (type_of_ne f) (function
-          | DPi { b } -> b Sub.id arg
+          | DPi { b; _ } -> b Sub.id arg
           | _ -> failwith "unreachable: internal type error")
     | DFst x ->
         force' (type_of_ne x) (function
-          | DSigma { a } -> Lazy.force a
+          | DSigma { a; _ } -> Lazy.force a
           | _ -> failwith "unreachable: internal type error")
     | DSnd x ->
         force' (type_of_ne x) (function
-          | DSigma { b } -> b Sub.id (lazy (DNe (DFst x)))
+          | DSigma { b; _ } -> b Sub.id (lazy (DNe (DFst x)))
           | _ -> failwith "unreachable: internal type error")
     | DDimApp(p, _) ->
         force' (type_of_ne p) (function
@@ -345,12 +337,12 @@ end = struct
           | _ -> failwith "unreachable: internal type error")
     | DUnglue g ->
         force' (type_of_ne g) (function
-          | DGlueType { b } -> Lazy.force b
+          | DGlueType { b; _ } -> Lazy.force b
           | _ -> failwith "unreachable: internal type error")
 
   let app f x = force f (function
     (* β rule: (λ x. f(x)) x ≡ f(x) *)
-    | DLam { f } -> f Sub.id x
+    | DLam { f; _ } -> f Sub.id x
     | DNe ne -> DNe (DApp(ne, x))
     | _ -> failwith "unreachable: internal type error")
 
@@ -520,7 +512,7 @@ end = struct
   and comp
     : 'n. 'n s dl -> 'n dim -> 'n dim -> ('n s dl, 'n) partial -> 'n dl -> 'n d
     = fun ty s t partial cap -> match Lazy.force ty with
-    | Depends { eqn = i, j; yes; no } when i = j ->
+    | Depends { eqn = i, j; yes; _ } when i = j ->
         comp yes s t partial cap
     | Depends { eqn = i, j; yes; no } -> begin
         if i = DimVar 0 || j = DimVar 0 then
@@ -570,7 +562,7 @@ end = struct
           let new_cap: m dl = lazy (app cap coe_x) in
           comp new_comp_ty s t new_partial new_cap }
 
-    | DSigma { name; a; b } ->
+    | DSigma { a; b; _ } ->
         let first = lazy
           (comp a s t
                 (List.map (fun (i, j, x) -> (i, j, lazy (fst x))) partial)
@@ -618,7 +610,7 @@ end = struct
 
         DDimAbs("i", lazy (comp new_ty s t new_partial new_cap))
 
-    | DU univ_idx ->
+    | DU _univ ->
         (* TODO: check that this is correct *)
         let mk_equiv t f is_equiv =
           lazy (DPair(t, lazy (DPair(f, is_equiv)))) in
@@ -702,7 +694,7 @@ end = struct
         is_contr (lazy (fiber a b f y)) }
 
   (* type-of-Glue-arg i B = ΣA:U_i. Σf:A→B. is-equiv A B f *)
-  and type_of_Glue_arg : 'n. int -> 'n dl -> 'n d = fun univ_lvl b ->
+  and type_of_Glue_arg : 'n. univ -> 'n dl -> 'n d = fun univ_lvl b ->
     DSigma
       { name = "A"
       ; a = lazy (DU univ_lvl)
@@ -957,6 +949,9 @@ module Conv : sig
 
   (* Conversion checking *)
   val eq : 'n Ctx.t -> 'n dl -> 'n dl -> 'n dl -> unit
+
+  (* Subtype checking *)
+  val sub : 'n Ctx.t -> 'n dl -> 'n dl -> unit
 end = struct
   open Domain
 
@@ -965,7 +960,7 @@ end = struct
 
   let rec conv : 'n. 'n Ctx.t -> 'n dl -> 'n dl -> 'n dl -> unit =
     fun ctx ty x y -> match Ctx.force ctx ty with
-    | DNe ne -> begin
+    | DNe _ -> begin
         match Ctx.force ctx x, Ctx.force ctx y with
         | DNe x, DNe y -> let _ = conv_ne ctx x y in ()
         | _ -> failwith "unreachable: internal type error"
@@ -975,7 +970,7 @@ end = struct
         let v, ctx' = Ctx.with_var ctx name a in
         let ty' = lazy (b Sub.id v) in
         conv ctx' ty' (lazy (Eval.app x v)) (lazy (Eval.app y v))
-    | DSigma { a; b } ->
+    | DSigma { a; b; _ } ->
         (* η rule: x ≡ (fst x, snd x) *)
         let fst_x = lazy (Eval.fst x) in
         conv ctx a fst_x (lazy (Eval.fst y));
@@ -983,29 +978,30 @@ end = struct
         conv ctx snd_ty (lazy (Eval.snd x)) (lazy (Eval.snd y))
     | DPathTy(a, _, _) ->
         (* η rule: p ≡ <i> p @ i *)
-        let i, ctx' = Ctx.with_dim_var ctx "i" in
+        let _, ctx' = Ctx.with_dim_var ctx "i" in
         let ty' = lazy (subst Sub.shift_up a) in
         conv ctx' ty' (lazy (Eval.un_dim_abs x)) (lazy (Eval.un_dim_abs y))
     | DGlueType { b; t_e } ->
         (* η rule: g ≡ glue [α ↦ g] (unglue g) *)
         (* honestly this η rule is kinda confusing but if unglue x = unglue y
-           then they kinda gotta be equal *)
+           then they kinda gotta be equal, right? *)
+        (* TODO: figure out the right thing to do here *)
         conv ctx b (lazy (Eval.unglue t_e x)) (lazy (Eval.unglue t_e y))
     | DU i -> begin
         match Ctx.force ctx x, Ctx.force ctx y with
         | DNe ne_x, DNe ne_y ->
             let _ = conv_ne ctx ne_x ne_y in ()
-        | DPi { name; a = ax; b = bx }, DPi { a = ay; b = by } ->
+        | DPi { name; a = ax; b = bx }, DPi { a = ay; b = by; _ } ->
             conv ctx ty ax ay;
             let v, ctx' = Ctx.with_var ctx name ax in
             conv ctx' ty (lazy (bx Sub.id v)) (lazy (by Sub.id v))
-        | DSigma { name; a = ax; b = bx }, DSigma { a = ay; b = by } ->
+        | DSigma { name; a = ax; b = bx }, DSigma { a = ay; b = by; _ } ->
             conv ctx ty ax ay;
             let v, ctx' = Ctx.with_var ctx name ax in
             conv ctx' ty (lazy (bx Sub.id v)) (lazy (by Sub.id v))
         | DPathTy(ax, lhs_x, rhs_x), DPathTy(ay, lhs_y, rhs_y) ->
             conv ctx ty ax ay;
-            conv ctx ax lhs_x rhs_y;
+            conv ctx ax lhs_x lhs_y;
             conv ctx ax rhs_x rhs_y
         | DU ix, DU iy when ix = iy -> ()
         | DGlueType { b = bx; t_e = te_x }, DGlueType { b = by; t_e = te_y } ->
@@ -1023,7 +1019,7 @@ end = struct
     | DComp { z; s = sx; t = tx; ty = ty_x
             ; partial = partial_x; cap = cap_x }
     , DComp { s = sy; t = ty; ty = ty_y
-            ; partial = partial_y; cap = cap_y }
+            ; partial = partial_y; cap = cap_y; _ }
       when sx = sy && tx = ty ->
         begin
           (* Types have to be the same *)
@@ -1038,18 +1034,18 @@ end = struct
         end
     | DApp(fa, xa), DApp(fb, xb) -> begin
         match Ctx.force ctx (conv_ne ctx fa fb) with
-          | DPi { a; b } ->
+          | DPi { a; b; _ } ->
               conv ctx a xa xb; lazy (b Sub.id xa)
           | _ -> failwith "unreachable: internal type error"
         end
     | DFst x, DFst y -> begin
         match Ctx.force ctx (conv_ne ctx x y) with
-          | DSigma { a } -> a
+          | DSigma { a; _ } -> a
           | _ -> failwith "unreachable: internal type error"
         end
     | DSnd x, DSnd y -> begin
         match Ctx.force ctx (conv_ne ctx x y) with
-          | DSigma { b } -> lazy (b Sub.id (lazy (DNe x)))
+          | DSigma { b; _ } -> lazy (b Sub.id (lazy (DNe x)))
           | _ -> failwith "unreachable: internal type error"
         end
     | DDimApp(pa, dim_a), DDimApp(pb, dim_b)
@@ -1064,7 +1060,7 @@ end = struct
     | DUnglue g_a, DUnglue g_b -> begin
         (* the t_e's better be equal for this to be well-typed *)
         match Ctx.force ctx (conv_ne ctx g_a g_b) with
-          | DGlueType { b } -> b
+          | DGlueType { b; _ } -> b
           | _ -> failwith "unreachable: internal type error"
         end
     | _ -> raise NotEqual
@@ -1092,6 +1088,30 @@ end = struct
   let eq ctx ty a b =
     try conv ctx ty a b
     with NotEqual ->
+      raise (Mismatch(Pretty.show ctx ty a, Pretty.show ctx ty b))
+
+  let rec sub : 'n. 'n Ctx.t -> 'n dl -> 'n dl -> unit =
+    (* TODO: decide how much subtyping I really want *)
+    fun ctx a b -> match Ctx.force ctx a, Ctx.force ctx b with
+    | DPi { name; a = ax; b = bx }, DPi { a = ay; b = by; _ } ->
+        sub ctx ay ax;
+        let v, ctx' = Ctx.with_var ctx name ay in
+        sub ctx' (lazy (bx Sub.id v)) (lazy (by Sub.id v))
+    | DSigma { name; a = ax; b = bx }, DSigma { a = ay; b = by; _ } ->
+        sub ctx ax ay;
+        let v, ctx' = Ctx.with_var ctx name ax in
+        sub ctx' (lazy (bx Sub.id v)) (lazy (by Sub.id v))
+    | DU ux, DU uy ->
+        (* U_x <: U_y  iff  x ≤ y *)
+        UnivSolver.lte ux uy
+    | _ ->
+        let ty = lazy (DU UnivSolver.infty) in
+        conv ctx ty a b
+
+  let sub ctx a b =
+    try sub ctx a b
+    with NotEqual ->
+      let ty = lazy (DU UnivSolver.infty) in
       raise (Mismatch(Pretty.show ctx ty a, Pretty.show ctx ty b))
 end
 
@@ -1153,4 +1173,37 @@ Where the Cube Rules run (note: perfectly safe for β rules to take precedence):
   - add Bool, Nat, their eliminators
   - handle universes in a more sane way -- typical ambiguity plus a solver?
   - consider changing path to pathp
+ *)
+
+(*
+HERE'S THE PLAN
+  → don't wanna write like 500 lines of composition for Glue
+  → want to get rid of the existing 200 lines of ugly composition code
+  → builtins! implement it *in the language*, benefitting from typechecking and
+    nice, concise syntax
+REQUIRES:
+  → dimensions as a first-class thing
+  → cofibrations as a first-class thing
+  → partial elements as a first-class thing
+    ⇒ formulas as a first-class thing, *with reflection principles*
+  → legit cofibrations, a legit formula entailment solver
+  → legit [α ↦ t | β ↦ u] (what is this called?)
+HOW TO MAKE ALL THE THINGS FIRST-CLASS:
+  → Perfectly fine to have 𝕀 and 𝔽 as *types*:
+    ————————     ————————
+     𝕀 type       𝔽 type
+    so long as they don't live in any *universe* U_i for any i
+  → Have universes U_i for each i
+  → Shoehorn the typechecker (which checks the judgement 'e : A') into checking
+    the judgement 'A type' with a new *fake universe* U_∞
+  → Typical ambiguity and a universe level constraint solver
+  → Subtyping is :/ but it'll be fine
+
+Add to domain:
+  DSplit of (cofib * dl) list
+
+  Is it true: f([α ↦ a | β ↦ b]) = [α ↦ f(a) | β ↦ f(b)] ?
+  That is difficult bc of typechecking: how to check at a DSplit type?
+  Specifically, how to *elaborate* at a DSplit type?
+  → Solution: a "whnf" function which also merges equiv. stuff under DSplit
  *)

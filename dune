@@ -1,0 +1,4 @@
+(executable
+ (name cubes)
+ (modules cubes extra)
+ (libraries angstrom))
