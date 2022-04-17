@@ -15,7 +15,7 @@ module AST = struct
              ; i: name; ty: ty
              ; lhs: exp; rhs: exp; a: exp }
     | Zero | One
-    (* Set and weird typecase stuff *)
+    (* Set and weird injectivity stuff *)
     | Set (* Set : Set lol *)
     | DomTy of exp
     | CodTy of exp
@@ -51,6 +51,8 @@ module Core = struct
              ; i: name; ty: ty binds
              ; lhs: tm binds; rhs: tm binds }
     | HCom of { s: dim; r': dim; i: name; lhs: tm binds; rhs: tm binds }
+    (* TODO delete *)
+    (* | Split of dim * tm * tm (1* ⚠ internal use only! ⚠ make up a path *1) *)
     (* Set *)
     | Set
     | DomTy of tm
@@ -81,7 +83,7 @@ module Domain = struct
 
   type 'n cond =
     | DimEq of 'n dim * 'n dim
-    | TyEq of 'n dne * 'n dne
+    | TyEq of 'n dl * 'n dl
     | Forall_i of 'n s cond
 
   and 'n dl = 'n d lazy_t
@@ -180,7 +182,7 @@ module Domain = struct
     and cond : 'n 'm. ('n, 'm) sub -> 'n cond -> 'm cond
       = fun s c -> match c with
       | DimEq(i, j) -> DimEq(dim s i, dim s j)
-      | TyEq(a, b) -> TyEq(dne s a, dne s b)
+      | TyEq(a, b) -> TyEq(dl s a, dl s b)
       | Forall_i c -> Forall_i (cond (extend s) c)
     
     and env_item : 'n 'm. ('n, 'm) sub -> 'n env_item -> 'm env_item
@@ -212,6 +214,14 @@ module Eval : sig
   (* val snd : 'n dl -> 'n d *)
 
   val un_dim_abs : 'n dl -> 'n s d
+
+  val dom_ty : 'n d -> 'n d
+  val cod_ty : 'n d -> 'n d
+  val pathp_ty_lhs : 'n d -> 'n d
+  val pathp_ty_rhs : 'n d -> 'n d
+  val pathp_ty_path : 'n d -> 'n d
+  val pathp_lhs : 'n d -> 'n d
+  val pathp_rhs : 'n d -> 'n d
 
   val eval : 'n env -> Core.tm -> 'n d
 end = struct
@@ -294,6 +304,41 @@ end = struct
         end
     | _ -> failwith "internal type error"
 
+  and dom_ty : 'n. 'n d -> 'n d
+    = fun x -> bind x (function
+      | DPi(a, _) -> Lazy.force a
+      | _ -> failwith "internal type error")
+
+  and cod_ty : 'n. 'n d -> 'n d
+    = fun x -> bind x (function
+      | DPi(_, b) -> DLam b
+      | _ -> failwith "internal type error")
+
+  and pathp_ty_lhs : 'n. 'n d -> 'n d
+    = fun x -> bind x (function
+      | DPathP(_, a, _, _) -> Sub.d (Sub.app Zero) (Lazy.force a)
+      | _ -> failwith "internal type error")
+
+  and pathp_ty_rhs : 'n. 'n d -> 'n d
+    = fun x -> bind x (function
+      | DPathP(_, a, _, _) -> Sub.d (Sub.app One) (Lazy.force a)
+      | _ -> failwith "internal type error")
+
+  and pathp_ty_path : 'n. 'n d -> 'n d
+    = fun x -> bind x (function
+      | DPathP(i, a, _, _) -> DDimAbs(i, a)
+      | _ -> failwith "internal type error")
+
+  and pathp_lhs : 'n. 'n d -> 'n d
+    = fun x -> bind x (function
+      | DPathP(_, _, lhs, _) -> Lazy.force lhs
+      | _ -> failwith "internal type error")
+
+  and pathp_rhs : 'n. 'n d -> 'n d
+    = fun x -> bind x (function
+      | DPathP(_, _, _, rhs) -> Lazy.force rhs
+      | _ -> failwith "internal type error")
+
   and eval : 'n. 'n env -> Core.tm -> 'n d
     = fun env tm -> match tm with
     | Var idx -> begin
@@ -304,19 +349,32 @@ end = struct
     | Let(_, x, body) ->
         eval (Val (lazy (eval env x))::env) body
     | Coe(r, r', i, ty, a) ->
-        failwith "TODO"
+        let env' = Dim (DimVar 0) :: Sub.env Sub.shift_up env in
+        let r, r' = eval_dim env r, eval_dim env r' in
+        let ty = lazy (eval env' ty) in
+        let a = lazy (eval env a) in
+        coe r r' ty a
     | Com { s; r; r'; i; ty; lhs; rhs } ->
-        failwith "TODO"
+        let env' = Dim (DimVar 0) :: Sub.env Sub.shift_up env in
+        let s, r, r' = eval_dim env s, eval_dim env r, eval_dim env r' in
+        let ty = lazy (eval env' ty) in
+        let lhs = lazy (eval env' lhs) in
+        let rhs = lazy (eval env' rhs) in
+        com s r r' ty lhs rhs
     | HCom { s; r'; i; lhs; rhs } ->
-        failwith "TODO"
+        let env' = Dim (DimVar 0) :: Sub.env Sub.shift_up env in
+        let s, r' = eval_dim env s, eval_dim env r' in
+        let lhs = lazy (eval env' lhs) in
+        let rhs = lazy (eval env' rhs) in
+        hcom s r' lhs rhs
     | Set -> DSet
-    | DomTy x -> failwith "TODO"
-    | CodTy x -> failwith "TODO"
-    | PathPTyLhs x -> failwith "TODO"
-    | PathPTyRhs x -> failwith "TODO"
-    | PathPTyPath x -> failwith "TODO"
-    | PathPLhs x -> failwith "TODO"
-    | PathPRhs x -> failwith "TODO"
+    | DomTy x -> dom_ty (eval env x)
+    | CodTy x -> cod_ty (eval env x)
+    | PathPTyLhs x -> pathp_ty_lhs (eval env x)
+    | PathPTyRhs x -> pathp_ty_rhs (eval env x)
+    | PathPTyPath x -> pathp_ty_path (eval env x)
+    | PathPLhs x -> pathp_lhs (eval env x)
+    | PathPRhs x -> pathp_rhs (eval env x)
     | Pi(name, a, b) ->
         DPi(lazy (eval env a), { name; env; body = b})
     | Lam(name, body) ->
@@ -344,6 +402,50 @@ end = struct
         | Dim d -> d
         | Val _ -> failwith "internal scoping error"
 
+  (* Special rules for coe:
+   * when r = r', coe is identity
+   * REGULARITY: when i,j ⊢ A(i) = A(j), coe is identity
+   *)
+  and coe : 'n. 'n dim -> 'n dim -> 'n s dl -> 'n dl -> 'n d
+    = fun r r' ty x -> bind_shift_down (Lazy.force ty) (function
+        | DSet -> Lazy.force x
+        | DPi(a, b) -> failwith "TODO"
+        | DPathP(_, ty, lhs, rhs) -> failwith "TODO"
+        | (DSplit _ | DNe _) as ty ->
+            let ty0 = lazy (Sub.d (Sub.app Zero) ty) in
+            let ty1 = lazy (Sub.d (Sub.app One) ty) in
+            let neutral = lazy (DNe (DCoe { r; r'; ty0; ty1; a = x })) in
+            DIf { cond = DimEq(r, r')
+                ; yes = x
+                ; no = lazy (DIf
+                  { cond = TyEq(ty0, ty1); yes = x; no = neutral }) }
+        | _ -> failwith "internal type error")
+
+  (* How to com<s> r r' (i.A) i.lhs i.rhs a:
+    hcom<s> r r' A(r')
+      i.(coe i r' (i.A) lhs)
+      i.(coe i r' (i.A) rhs)
+      (coe r r' (i.A) a)
+  *)
+  and com
+    : 'n. 'n dim -> 'n dim -> 'n dim -> 'n s dl -> 'n s dl -> 'n s dl -> 'n d
+    = fun s r r' ty lhs rhs ->
+    let ty_up = Sub.dl Sub.shift_up ty in
+    let r'_up = Sub.dim Sub.shift_up r' in
+    let coerce_it x = lazy (coe (DimVar 0) r'_up ty_up x) in
+    let lhs', rhs' = coerce_it lhs, coerce_it rhs in
+    hcom s r' lhs' rhs'
+
+  (* How to hcom<s> r r' A i.lhs i.rhs a:
+    All that matters is the boundary behavior!
+    Just return DSplit s lhs(r') rhs(r')
+    Lmao
+  *)
+  and hcom : 'n. 'n dim -> 'n dim -> 'n s dl -> 'n s dl -> 'n d
+    = fun s r' lhs rhs ->
+      let lhs_r' = Sub.dl (Sub.app r') lhs in
+      let rhs_r' = Sub.dl (Sub.app r') rhs in
+      DSplit(s, lhs_r', rhs_r')
 end
 
 module Ctx : sig
@@ -507,8 +609,12 @@ module Conv : sig
 end = struct
   open Domain
   
-  exception Mismatch of string * string
+  let lam_to_clos lam =
+    { name = "x"
+    ; env = [Val lam]
+    ; body = App(Var 1, Var 0) }
 
+  (* Resolve DIf/DSplit conditions and apply INTERNAL INJECTIVITY! *)
   let rec force : 'n. 'n Ctx.t -> 'n dl -> 'n d
     = fun ctx x -> match Lazy.force x with
     | DIf { cond; yes; no } ->
@@ -518,41 +624,152 @@ end = struct
           force ctx l
         else if Ctx.are_dims_eq ctx dim One then
           force ctx r
-        else match force ctx l, force ctx r with
+        else
+          let l, r = force ctx l, force ctx r in
+          let tm = DSplit(dim, lazy l, lazy r) in
+          match l, r with
           | DNe l, DNe r when eq_ne ctx l r -> DNe l
           | DSet, DSet -> DSet
-          | DPi(al, bl), DPi(ar, br) ->
-              let b = failwith "TODO" in
-              DPi(lazy (DSplit(dim, al, ar)), b)
-          | DPathP(i, lty, llhs, lrhs), DPathP(_, rty, rlhs, rrhs) ->
-              DPathP( i
-                    , lazy (DSplit(Sub.dim Sub.shift_up dim, lty, rty))
-                    , lazy (DSplit(dim, llhs, rlhs))
-                    , lazy (DSplit(dim, lrhs, rrhs)))
-          | l, r -> DSplit(dim, lazy l, lazy r)
+          | DPi _, DPi _ ->
+              let dom = lazy (Eval.dom_ty tm) in
+              let cod = lazy (Eval.cod_ty tm) in
+              DPi(dom, lam_to_clos cod)
+          | DPathP _, DPathP _ ->
+              let a = lazy (Eval.un_dim_abs (lazy (Eval.pathp_ty_path tm))) in
+              let lhs = lazy (Eval.pathp_lhs tm) in
+              let rhs = lazy (Eval.pathp_rhs tm) in
+              DPathP("i", a, lhs, rhs)
+          (* TODO: extend this when extending the domain *)
+          | _ -> DSplit(dim, lazy l, lazy r)
         end
     | x -> x
 
   and is_cond_true : 'n. 'n Ctx.t -> 'n cond -> bool
     = fun ctx cond -> match cond with
     | DimEq(i, j) -> Ctx.are_dims_eq ctx i j
-    | TyEq(x, y) -> eq_ne ctx x y
+    | TyEq(x, y) -> eq ctx (lazy DSet) x y
     | Forall_i cond ->
         let _i, ctx' = Ctx.with_dim_var ctx "i" in
         is_cond_true ctx' cond
 
   and eq_ne : 'n. 'n Ctx.t -> 'n dne -> 'n dne -> bool
-    = fun ctx a b -> Option.is_some (conv_ne ctx a b)
+    = fun ctx x y -> Option.is_some (conv_ne ctx x y)
 
+  (* Conversion checking of neutrals returns their type *)
   and conv_ne : 'n. 'n Ctx.t -> 'n dne -> 'n dne -> 'n dl option
-    = fun ctx a b -> failwith "TODO"
+    = fun ctx x y -> match x, y with
+    | DVar(x, ty), DVar(y, _) ->
+        if x = y then Some ty else None
+    | DApp(fx, arg_x), DApp(fy, arg_y) ->
+        Option.bind (Option.map Lazy.force (conv_ne ctx fx fy)) (function
+          | DPi(a, b) ->
+              let open Eval in
+              if eq ctx a arg_x arg_y then Some (lazy (b $ arg_x)) else None
+          | _ -> failwith "internal type error")
+    | DCoe { r = rx; r' = r'_x; ty0 = ty0_x; ty1 = ty1_x; a = ax }
+    , DCoe { r = ry; r' = r'_y; ty0 = ty0_y; ty1 = ty1_y; a = ay } ->
+        if not (Ctx.are_dims_eq ctx rx ry) then None
+        else if not (Ctx.are_dims_eq ctx r'_x r'_y) then None
+        else if not (eq ctx (lazy DSet) ty0_x ty0_y) then None
+        else if not (eq ctx (lazy DSet) ty1_x ty1_y) then None
+        else if not (eq ctx (lazy (DSplit(rx, ty0_x, ty1_x))) ax ay) then None
+        else Some (lazy (DSplit(r'_x, ty0_x, ty0_y)))
+    | _ -> None
 
   and eq : 'n. 'n Ctx.t -> 'n dl -> 'n dl -> 'n dl -> bool
-    = fun ctx ty a b -> failwith "TODO"
+    = fun ctx ty x y -> match force ctx ty with
+    | DNe _ as ty -> begin
+        (* hooray for *boundary separation* *)
+        (* TODO: make a "check both" combinator *)
+        match force ctx x, force ctx y with
+        | DSplit(dim, xl, xr), y ->
+            let ctx_l = Option.get @@ Ctx.with_eqn ctx dim Zero in
+            let ctx_r = Option.get @@ Ctx.with_eqn ctx dim One in
+            let ty, y = lazy ty, lazy y in
+            eq ctx_l ty xl y && eq ctx_r ty xr y
+        | x, DSplit(dim, yl, yr) ->
+            let ctx_l = Option.get @@ Ctx.with_eqn ctx dim Zero in
+            let ctx_r = Option.get @@ Ctx.with_eqn ctx dim One in
+            let ty, x = lazy ty, lazy x in
+            eq ctx_l ty x yl && eq ctx_r ty x yr
+        | DNe x, DNe y -> eq_ne ctx x y
+        | _ -> failwith "internal type error"
+        end
+    | DSplit(dim, ty_l, ty_r) ->
+        (* hooray for *boundary separation* *)
+        let ctx_l = Option.get @@ Ctx.with_eqn ctx dim Zero in
+        let ctx_r = Option.get @@ Ctx.with_eqn ctx dim One in
+        eq ctx_l ty_l x y && eq ctx_r ty_r x y
+    | DSet -> begin
+        match force ctx x, force ctx y with
+        | DSplit(dim, xl, xr), y ->
+            let ty = lazy DSet in
+            let y = lazy y in
+            let ctx_l = Option.get @@ Ctx.with_eqn ctx dim Zero in
+            let ctx_r = Option.get @@ Ctx.with_eqn ctx dim One in
+            eq ctx_l ty xl y && eq ctx_r ty xr y
+        | x, DSplit(dim, yl, yr) ->
+            let ty = lazy DSet in
+            let x = lazy x in
+            let ctx_l = Option.get @@ Ctx.with_eqn ctx dim Zero in
+            let ctx_r = Option.get @@ Ctx.with_eqn ctx dim One in
+            eq ctx_l ty x yl && eq ctx_r ty x yr
+        | DNe x, DNe y -> eq_ne ctx x y
+        | DSet, DSet -> true
+        | DPi(xa, xb), DPi(ya, yb) ->
+            let open Eval in
+            eq ctx (lazy DSet) xa ya &&
+              let v, ctx' = Ctx.with_var ctx xb.name xa in
+              eq ctx' (lazy DSet) (lazy (xb $ v)) (lazy (yb $ v))
+        | DPathP(name, xa, xl, xr), DPathP(_, ya, yl, yr) ->
+            let _i, ctx' = Ctx.with_dim_var ctx name in
+            eq ctx' (lazy DSet) xa ya &&
+              let ty_l = Sub.dl (Sub.app Zero) xa in
+              let ty_r = Sub.dl (Sub.app One) xa in
+              eq ctx ty_l xl yl && eq ctx ty_r xr yr
+        | _ -> false
+        end
+    | DPi(a, b) ->
+        let v, ctx' = Ctx.with_var ctx b.name a in
+        let open Eval in
+        eq ctx' (lazy (b $ v)) (lazy (app x v)) (lazy (app y v))
+    | DPathP _ -> true (* lol definitional UIP *)
+    | _ -> failwith "internal error: not a type"
 
   (* TODO *)
+  let sub : 'n. 'n Ctx.t -> 'n dl -> 'n dl -> bool
+    = fun ctx x y -> eq ctx (lazy DSet) x y
+
+  exception Mismatch of string * string
+
+  let check_eq ctx ty x y =
+    if not (eq ctx ty x y) then
+      let x = Pretty.show ctx ty x in
+      let y = Pretty.show ctx ty y in
+      raise (Mismatch(x, y))
+
+  let check_sub ctx x y =
+    if not (sub ctx x y) then
+      let x = Pretty.show ctx (lazy DSet) x in
+      let y = Pretty.show ctx (lazy DSet) y in
+      raise (Mismatch(x, y))
 end
 
+module Tychk = struct
+  open Domain
+
+  exception TypeError of string
+
+  (* the main check/infer loop! *)
+  let rec check : 'n. 'n Ctx.t -> AST.exp -> 'n dl -> Core.tm =
+    fun ctx exp ty -> match exp, ty with
+    | _ -> failwith "TODO"
+
+  and infer : 'n. 'n Ctx.t -> AST.exp -> 'n dl * Core.tm =
+    fun ctx exp -> match exp with
+    | _ -> failwith "TODO"
+
+end
 
 (*
 
@@ -565,31 +782,7 @@ How to coe r r' (i.A) a: (force A and) match A with
   | i ? l : r   ⇒  ??? (some kinda neutral term; BUT ALSO cube rules)
   | neutral     ⇒  ??? (some kinda neutral term; BUT ALSO cube rules)
 
-Special rules for coe:
-  when r = r', coe is identity
-    ⇒ DIf (Eq r r') a (neutral term)
-  REGULARITY: when i,j ⊢ A(i) = A(j), coe is identity
-    ⇒ DIf (IsEq A(0) A(1)) a (neutral term)
-
-How to com<s> r r' (i.A) i.lhs i.rhs a:
-  hcom<s> r r' A(r')
-    i.(coe i r' (i.A) lhs)
-    i.(coe i r' (i.A) rhs)
-    (coe r r' (i.A) a)
-
-How to hcom<s> r r' A i.lhs i.rhs a:
-  All that matters is the boundary behavior!
-  Just return DSplit s lhs(r') rhs(r')
-  Lmao
-
-→ I think XTT satisfies canonicity but not normalization
-→ so I shouldn't bother to put unnecessary-for-computation things in the core
-  language, lol
-→ definitional UIP is one helluva drug
-
-
 *)
-
 
 
 
