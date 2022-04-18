@@ -14,6 +14,7 @@ module AST = struct
     | Com of { s: dim; r: dim; r': dim
              ; i: name; ty: ty
              ; lhs: exp; rhs: exp; a: exp }
+    (* TODO: hcom *)
     | Zero | One
     (* Set and weird injectivity stuff *)
     | Set (* Set : Set lol *)
@@ -51,8 +52,7 @@ module Core = struct
              ; i: name; ty: ty binds
              ; lhs: tm binds; rhs: tm binds }
     | HCom of { s: dim; r': dim; i: name; lhs: tm binds; rhs: tm binds }
-    (* TODO delete *)
-    (* | Split of dim * tm * tm (1* ⚠ internal use only! ⚠ make up a path *1) *)
+    | Abort
     (* Set *)
     | Set
     | DomTy of tm
@@ -224,6 +224,7 @@ module Eval : sig
   val pathp_rhs : 'n d -> 'n d
 
   val eval : 'n env -> Core.tm -> 'n d
+  val eval_dim : 'n env -> Core.dim -> 'n dim
 end = struct
   open Domain
 
@@ -367,6 +368,7 @@ end = struct
         let lhs = lazy (eval env' lhs) in
         let rhs = lazy (eval env' rhs) in
         hcom s r' lhs rhs
+    | Abort -> failwith "unreachable"
     | Set -> DSet
     | DomTy x -> dom_ty (eval env x)
     | CodTy x -> cod_ty (eval env x)
@@ -402,15 +404,54 @@ end = struct
         | Dim d -> d
         | Val _ -> failwith "internal scoping error"
 
-  (* Special rules for coe:
-   * when r = r', coe is identity
-   * REGULARITY: when i,j ⊢ A(i) = A(j), coe is identity
-   *)
+  (* How to coe r r' (i.A) a: (bottom of p.14)
+    (force A and) match A with
+    | Π(x:A) → B   ⇒  λ x. coe r r' i.B(coe r' i (i.A) x) (a(coe r' r i.A x))
+    | Σ(x:A) × B   ⇒  (coe r r' i.A a.0, coe r r' i.B(coe r i i.A a.0) a.1
+    | Path j.A x y ⇒  λ j. com<j> r r' i.A(j) i.x i.y i.a@j
+    | Bool         ⇒  a
+    | Set          ⇒  a
+    | i ? l : r    ⇒  (a neutral term; BUT ALSO special rules)
+    | neutral      ⇒  (a neutral term; BUT ALSO special rules)
+
+  Special rules for coe:
+   - when r = r', coe is identity
+   - REGULARITY: when i,j ⊢ A(i) = A(j), coe is identity
+  *)
   and coe : 'n. 'n dim -> 'n dim -> 'n s dl -> 'n dl -> 'n d
     = fun r r' ty x -> bind_shift_down (Lazy.force ty) (function
         | DSet -> Lazy.force x
-        | DPi(a, b) -> failwith "TODO"
-        | DPathP(_, ty, lhs, rhs) -> failwith "TODO"
+        | DPi(a, b) ->
+            let a = lazy (DDimAbs("i", a)) in
+            let b = lazy (DDimAbs("i", lazy (DLam b))) in
+
+            (* indices:    1      2       3      4      5 *)
+            let env = [Dim r; Dim r'; Val a; Val b; Val x] in
+
+            (* λ x. coe r r' i.B(coe r' i (i.A) x) (a(coe r' r i.A x)) *)
+            let open Core in
+            let arg, r, r', a, b, x =
+              Var 0, DimVar 1, DimVar 2, Var 3, Var 4, Var 5 in
+            let body = Coe(r, r', "i",
+              begin
+                let i, arg, r, r', a, b, x =
+                  DimVar 0, Var 1, DimVar 2, DimVar 3, Var 4, Var 5, Var 6 in
+                App(DimApp(b, i), Coe(r', i, "i", DimApp(Var 5, DimVar 0), arg))
+              end,
+              App(x, Coe(r', r, "i", DimApp(Var 4, DimVar 0), arg))) in
+            DLam { name = "x"; env; body }
+        | DPathP(j, ty, lhs, rhs) ->
+            DDimAbs(j, lazy (
+              let shift: ('n, 'n s) sub = Sub.shift_up in
+              let shift' = Sub.extend shift in
+              let r, r' = Sub.dim shift r, Sub.dim shift r' in
+              let lhs, rhs = Sub.dl shift' lhs, Sub.dl shift' rhs in
+              (* let cap = lazy (dim_app *)
+              (*   (Sub.dl (Sub.compose Sub.shift_up shift) a) (DimVar 1)) in *)
+              let swap: ('n s s, 'n s s) sub =
+                Sub.(compose (app (DimVar 1)) (extend shift')) in
+              let ty = Sub.dl swap ty in
+              com (DimVar 0) r r' ty lhs rhs))
         | (DSplit _ | DNe _) as ty ->
             let ty0 = lazy (Sub.d (Sub.app Zero) ty) in
             let ty1 = lazy (Sub.d (Sub.app One) ty) in
@@ -676,44 +717,37 @@ end = struct
         else Some (lazy (DSplit(r'_x, ty0_x, ty0_y)))
     | _ -> None
 
+  (* hooray for *boundary separation* *)
+  and check_both : 'n Ctx.t -> 'n dim -> 'n dl -> 'n dl
+    -> ('n Ctx.t -> 'n dl -> bool) -> bool
+    = fun ctx dim l r k ->
+    let ctx_l = Option.get @@ Ctx.with_eqn ctx dim Zero in
+    let ctx_r = Option.get @@ Ctx.with_eqn ctx dim One in
+    k ctx_l l && k ctx_r r
+
   and eq : 'n. 'n Ctx.t -> 'n dl -> 'n dl -> 'n dl -> bool
     = fun ctx ty x y -> match force ctx ty with
     | DNe _ as ty -> begin
-        (* hooray for *boundary separation* *)
-        (* TODO: make a "check both" combinator *)
         match force ctx x, force ctx y with
         | DSplit(dim, xl, xr), y ->
-            let ctx_l = Option.get @@ Ctx.with_eqn ctx dim Zero in
-            let ctx_r = Option.get @@ Ctx.with_eqn ctx dim One in
             let ty, y = lazy ty, lazy y in
-            eq ctx_l ty xl y && eq ctx_r ty xr y
+            check_both ctx dim xl xr (fun ctx x -> eq ctx ty x y)
         | x, DSplit(dim, yl, yr) ->
-            let ctx_l = Option.get @@ Ctx.with_eqn ctx dim Zero in
-            let ctx_r = Option.get @@ Ctx.with_eqn ctx dim One in
             let ty, x = lazy ty, lazy x in
-            eq ctx_l ty x yl && eq ctx_r ty x yr
+            check_both ctx dim yl yr (fun ctx y -> eq ctx ty x y)
         | DNe x, DNe y -> eq_ne ctx x y
         | _ -> failwith "internal type error"
         end
     | DSplit(dim, ty_l, ty_r) ->
-        (* hooray for *boundary separation* *)
-        let ctx_l = Option.get @@ Ctx.with_eqn ctx dim Zero in
-        let ctx_r = Option.get @@ Ctx.with_eqn ctx dim One in
-        eq ctx_l ty_l x y && eq ctx_r ty_r x y
+        check_both ctx dim ty_l ty_r (fun ctx ty -> eq ctx ty x y)
     | DSet -> begin
         match force ctx x, force ctx y with
         | DSplit(dim, xl, xr), y ->
-            let ty = lazy DSet in
-            let y = lazy y in
-            let ctx_l = Option.get @@ Ctx.with_eqn ctx dim Zero in
-            let ctx_r = Option.get @@ Ctx.with_eqn ctx dim One in
-            eq ctx_l ty xl y && eq ctx_r ty xr y
+            let ty, y = lazy DSet, lazy y in
+            check_both ctx dim xl xr (fun ctx x -> eq ctx ty x y)
         | x, DSplit(dim, yl, yr) ->
-            let ty = lazy DSet in
-            let x = lazy x in
-            let ctx_l = Option.get @@ Ctx.with_eqn ctx dim Zero in
-            let ctx_r = Option.get @@ Ctx.with_eqn ctx dim One in
-            eq ctx_l ty x yl && eq ctx_r ty x yr
+            let ty, x = lazy DSet, lazy x in
+            check_both ctx dim yl yr (fun ctx y -> eq ctx ty x y)
         | DNe x, DNe y -> eq_ne ctx x y
         | DSet, DSet -> true
         | DPi(xa, xb), DPi(ya, yb) ->
@@ -762,27 +796,124 @@ module Tychk = struct
 
   (* the main check/infer loop! *)
   let rec check : 'n. 'n Ctx.t -> AST.exp -> 'n dl -> Core.tm =
-    fun ctx exp ty -> match exp, ty with
-    | _ -> failwith "TODO"
+    fun ctx exp ty -> match exp, Conv.force ctx ty with
+    | Lam(x, body), DPi(a, b) ->
+        let v, ctx' = Ctx.with_var ctx x a in
+        Core.Lam(x, check ctx' body (lazy Eval.(b $ v)))
+    | Let(x, e, b), t ->
+        let tm, ty = infer ctx e in
+        let value = lazy (Eval.eval (Ctx.env ctx) tm) in
+        let ctx' = Ctx.with_defn ctx x ty value in
+        Core.Let(x, tm, check ctx' b (lazy t))
+    | Lam(name, body), DPathP(_, ty, lhs, rhs) ->
+        let i, ctx' = Ctx.with_dim_var ctx name in
+        let body = check ctx' body ty in
+        let actual_lhs = lazy (Eval.eval (Dim Zero::Ctx.env ctx) body) in
+        let actual_rhs = lazy (Eval.eval (Dim One ::Ctx.env ctx) body) in
+        Conv.check_eq ctx (Sub.dl (Sub.app Zero) ty) actual_lhs lhs;
+        Conv.check_eq ctx (Sub.dl (Sub.app One) ty) actual_rhs rhs;
+        Core.DimAbs(name, body)
+    | e, t ->
+        let tm, t' = infer ctx e in
+        Conv.check_sub ctx t' (lazy t);
+        tm
+  
+  and check_dim : 'n. 'n Ctx.t -> AST.exp -> Core.dim
+    = fun ctx e -> match e with
+    | Zero -> Core.Zero
+    | One  -> Core.One
+    | Var v -> Core.DimVar (Ctx.lookup_dim ctx v)
+    | _ -> raise (TypeError("it is not a dimension"))
 
-  and infer : 'n. 'n Ctx.t -> AST.exp -> 'n dl * Core.tm =
-    fun ctx exp -> match exp with
+  and infer : 'n. 'n Ctx.t -> AST.exp -> Core.tm * 'n dl
+    = fun ctx exp -> match exp with
+    | Var v ->
+        let i, ty = Ctx.lookup_var ctx v in
+        Core.Var i, ty
+    | Let(x, e, b) ->
+        let tm, ty = infer ctx e in
+        let value = lazy (Eval.eval (Ctx.env ctx) tm) in
+        let ctx' = Ctx.with_defn ctx x ty value in
+        let body, t = infer ctx' b in
+        Core.Let(x, tm, body), t
+    | Annot(e, t) ->
+        let t_tm = check ctx t (lazy DSet) in
+        let t = lazy (Eval.eval (Ctx.env ctx) t_tm) in
+        let tm = check ctx e t in
+        tm, t
+    | Coe { r; r'; i; ty; a } ->
+        let r', r = check_dim ctx r', check_dim ctx r in
+        let _, ctx' = Ctx.with_dim_var ctx i in
+        let ty = check ctx' ty (lazy DSet) in
+        let ty_at dim =
+          let env = Ctx.env ctx in
+          lazy (Eval.eval (Dim (Eval.eval_dim env dim)::env) ty) in
+        let ty_r, ty_r' = ty_at r, ty_at r' in
+        let a = check ctx a ty_r in
+        Core.Coe(r, r', i, ty, a), ty_r'
+    | Com { s; r; r'; i; ty; lhs; rhs; a } ->
+        let r', r, s = check_dim ctx r', check_dim ctx r, check_dim ctx s in
+        let _, ctx' = Ctx.with_dim_var ctx i in
+        let ty = check ctx' ty (lazy DSet) in
+        let ty_v = lazy (Eval.eval (Ctx.env ctx') ty) in
+        let s_v = Eval.eval_dim (Ctx.env ctx') s in
+        let r_v = Eval.eval_dim (Ctx.env ctx) r in
+        let r'_v = Eval.eval_dim (Ctx.env ctx) r' in 
+        let a_ty = Sub.dl (Sub.app r_v) ty_v in
+        let res_ty = Sub.dl (Sub.app r'_v) ty_v in
+        let a = check ctx a a_ty in
+        let lhs = match Ctx.with_eqn ctx' s_v Zero with
+          | None -> print_endline "warning: wack"; Core.Abort
+          | Some ctx'' -> check ctx'' lhs ty_v in
+        let rhs = match Ctx.with_eqn ctx' s_v One with
+          | None -> print_endline "warning: wack"; Core.Abort
+          | Some ctx'' -> check ctx'' rhs ty_v in
+        (* coherence conditions:
+          s=0 ⊢ a = lhs@r
+          s=1 ⊢ a = rhs@r
+        *)
+        let a_v = lazy (Eval.eval (Ctx.env ctx) a) in
+        let s_v = Eval.eval_dim (Ctx.env ctx) s in
+        Option.iter (fun ctx ->
+          let lhs = lazy (Eval.eval (Dim r_v::Ctx.env ctx) lhs) in
+          Conv.check_eq ctx a_ty lhs a_v) (Ctx.with_eqn ctx s_v Zero);
+        Option.iter (fun ctx ->
+          let rhs = lazy (Eval.eval (Dim r_v::Ctx.env ctx) rhs) in
+          Conv.check_eq ctx a_ty rhs a_v) (Ctx.with_eqn ctx s_v One);
+
+        Core.Com { s; r; r'; i; ty; lhs; rhs }, res_ty
+
+    | Set -> Core.Set, lazy DSet
+    | Pi(x, a, b) ->
+        let a = check ctx a (lazy DSet) in
+        let _, ctx' = Ctx.with_var ctx x (lazy (Eval.eval (Ctx.env ctx) a)) in
+        let b = check ctx' b (lazy DSet) in
+        Core.Pi(x, a, b), lazy DSet
+    | PathP(i, ty, lhs, rhs) ->
+        let _, ctx' = Ctx.with_dim_var ctx i in
+        let ty = check ctx' ty (lazy DSet) in
+        let ty_at dim =
+          let env = Ctx.env ctx in
+          lazy (Eval.eval (Dim dim::env) ty) in
+        let ty0, ty1 = ty_at Zero, ty_at One in
+        let lhs = check ctx lhs ty0 in
+        let rhs = check ctx rhs ty1 in
+        Core.PathP(i, ty, lhs, rhs), lazy DSet
+    | App(f, x) ->
+        let f, f_ty = infer ctx f in
+        begin match Conv.force ctx f_ty with
+          | DPi(a, b) ->
+              let x = check ctx x a in
+              let v = lazy (Eval.eval (Ctx.env ctx) x) in
+              Core.App(f, x), lazy Eval.(b $ v)
+          | DPathP(_, a, _, _) ->
+              let i = check_dim ctx x in
+              let ty = Sub.dl (Sub.app (Eval.eval_dim (Ctx.env ctx) i)) a in
+              Core.DimApp(f, i), ty
+          | _ -> raise (TypeError "that's not a function")
+        end
     | _ -> failwith "TODO"
 
 end
-
-(*
-
-How to coe r r' (i.A) a: (force A and) match A with
-  | Π(x:A) → B  ⇒  (...) (bottom of p.14)
-  | Σ(x:A) × B  ⇒  (...)
-  | Path A x y  ⇒  (...)
-  | Bool        ⇒  a
-  | Set         ⇒  a
-  | i ? l : r   ⇒  ??? (some kinda neutral term; BUT ALSO cube rules)
-  | neutral     ⇒  ??? (some kinda neutral term; BUT ALSO cube rules)
-
-*)
-
 
 
