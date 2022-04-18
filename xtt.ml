@@ -1003,17 +1003,26 @@ end = struct
 
   let parse s =
     (* a hack but it works *)
+    let len = String.length s in
     let s = s ^ "\000" in
 
     let rec many p i =
       Option.fold ~none:([], i) ~some:(fun (x, i) ->
         let xs, i = many p i in x :: xs, i) (p i) in
+
+    let matches k i =
+      String.length s - i >= String.length k
+        && String.sub s i (String.length k) = k in
+
     let definitely n = function
       | Some x -> x
       | None -> raise (ParseError("expected " ^ n)) in
 
     let rec ws i =
-      if String.contains " \n\t" s.[i] then ws (i+1) else i
+      if String.contains " \n\t" s.[i] then ws (i+1)
+      else if matches "--" i then
+        ws (String.index_from s (i+2) '\n' + 1)
+      else i
     and end_of_ident i =
       if 'a' <= s.[i] && s.[i] <= 'z'
         || 'A' <= s.[i] && s.[i] <= 'Z'
@@ -1025,9 +1034,6 @@ end = struct
 
     and reserved = ["let"]
 
-    and matches k i =
-      String.length s - i >= String.length k
-        && String.sub s i (String.length k) = k
     and after_kw k i = ws (i + String.length k)
 
     and str x i =
@@ -1144,22 +1150,38 @@ end = struct
         Eq(e, rhs), i
       else e, i in
 
-    let e, i = expr 0 in
-    if i + 1 = String.length s then
-      e
+    let e, i = expr (ws 0) in
+    if i = len then e
     else raise (ParseError "didn't parse everything")
 end
 
-let main () =
+let repl () =
   let ctx = Ctx.initial_ctx in
   try while true do
     print_string "> "; Format.print_flush ();
     let line = input_line stdin in
     let ast = Parser.parse line in
     let _, ty = Tychk.infer ctx ast in
-    print_endline "well-typed!";
+    print_endline "<stdin> is well-typed!";
     print_endline ("it : " ^ Pretty.show ctx (lazy Domain.DSet) ty)
   done with End_of_file -> ()
+
+(* From stackoverflow *)
+let read_file filename =
+  let ch = open_in_bin filename in
+  let s = really_input_string ch (in_channel_length ch) in
+  close_in ch; s
+
+let main () =
+  if Array.length Sys.argv > 1 then
+    let fn = Sys.argv.(1) in
+    let input = read_file fn in
+    let ast = Parser.parse input in
+    let ctx = Ctx.initial_ctx in
+    let _, ty = Tychk.infer ctx ast in
+    print_endline (fn ^ " is well-typed!");
+    print_endline ("it : " ^ Pretty.show ctx (lazy Domain.DSet) ty)
+  else repl ()
 
 let () = main ()
 

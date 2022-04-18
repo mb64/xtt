@@ -1,0 +1,25 @@
+
+let id = (λ A x → x) : Π (A : Set) (x : A) → A;
+
+let refl = (λ A x i → x) : Π (A : Set) (x : A) → pathp i.A x x;
+
+let funext = (λ A B f g pf i x → pf x i)
+  : Π (A : Set) (B : Π(x: A) → Set) (f g : Π(x: A) → B x)
+      (pf : ∀ (x : A) → pathp i.(B x) (f x) (g x))
+  → pathp i.(Π (x : A) → B x) f g;
+
+let sym = (λ A x y p i → com<i> 1 0 j.A j.y j.(p j) y)
+  : Π (A : Set) (x y : A) (p : pathp i.A x y) → pathp i.A y x;
+
+let trans = (λ A x y z p q i → com<i> 0 1 j.A j.x j.(q j) (p i))
+  : Π (A : Set) (x y z : A) (p : pathp i.A x y) (q : pathp i.A y z)
+  → pathp i.A x z;
+
+-- Definitional UIP!
+let UIP_type = Π (A B : Set) (Ty : pathp i.Set A B) (x : A) (y : B)
+  (p q : pathp i.(Ty i) x y) → pathp i.(pathp i.(Ty i) x y) p q;
+
+let uip = (λ A B Ty x y p q i → p) : UIP_type;
+
+id
+
