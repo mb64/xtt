@@ -10,10 +10,12 @@ module AST = struct
     | Var of name
     | Let of name * exp * exp
     | Annot of exp * ty
+    (* coe r r' i.A a *)
     | Coe of { r: dim; r': dim; i: name; ty: ty; a: exp }
+    (* com<s> r r' i.A i.lhs i.rhs a *)
     | Com of { s: dim; r: dim; r': dim
-             ; i: name; ty: ty
-             ; lhs: exp; rhs: exp; a: exp }
+             ; ty: name * ty
+             ; lhs: name * exp; rhs: name * exp; a: exp }
     (* TODO: hcom *)
     | Zero | One
     (* Set and weird injectivity stuff *)
@@ -27,16 +29,19 @@ module AST = struct
     | PathPRhs of exp
     (* Functions *)
     | Pi of name * ty * ty
+    (* pathp i.A lhs rhs *)
     | PathP of name * ty * exp * exp
+    (* lhs ≡ rhs *)
+    | Eq of exp * exp
     | Lam of name * exp
     | App of exp * exp
-    (* (1* Pairs *1) *)
-    (* | Sigma of name * ty * ty *)
-    (* | Pair of exp * exp *)
-    (* | Fst of exp *)
-    (* | Snd of exp *)
-    (* | FstTy of exp *)
-    (* | SndTy of exp *)
+    (* Pairs *)
+    | Sigma of name * ty * ty
+    | Pair of exp * exp
+    | Fst of exp
+    | Snd of exp
+    | FstTy of exp
+    | SndTy of exp
 end
 
 module Core = struct
@@ -551,7 +556,7 @@ end = struct
     ; dim_names = []
     ; env = []
     ; tys = []
-    ; formula = DisjSets.empty }
+    ; formula = DisjSets.(empty |> add 0 0 |> add 1 1) }
 
   let lvl ctx = ctx.lvl
   let tm_names ctx = ctx.tm_names
@@ -587,7 +592,8 @@ end = struct
     let value = lazy (DNe (DVar(ctx.lvl, ty))) in
     value, with_defn ctx name ty value
 
-  let dim_to_id ctx = function
+  let dim_to_id ctx =
+    function
     | Zero -> 0
     | One  -> 1
     | DimVar idx -> 2 + ctx.dim_count - idx - 1
@@ -620,17 +626,6 @@ end = struct
     DisjSets.find i_id ctx.formula = DisjSets.find j_id ctx.formula
 end
 
-module Pretty : sig
-  open Domain
-
-  val show : 'n Ctx.t -> 'n dl -> 'n dl -> string
-end = struct
-  open Domain
-
-  (* TODO *)
-  let show ctx ty x = failwith "TODO"
-end
-
 module Conv : sig
   open Domain
   
@@ -641,12 +636,6 @@ module Conv : sig
 
   (* Subtype checking *)
   val sub : 'n Ctx.t -> 'n dl -> 'n dl -> bool
-
-  (* Same thing but it throws an exception if not *)
-  exception Mismatch of string * string
-
-  val check_eq : 'n Ctx.t -> 'n dl -> 'n dl -> 'n dl -> unit
-  val check_sub : 'n Ctx.t -> 'n dl -> 'n dl -> unit
 end = struct
   open Domain
   
@@ -774,25 +763,104 @@ end = struct
   let sub : 'n. 'n Ctx.t -> 'n dl -> 'n dl -> bool
     = fun ctx x y -> eq ctx (lazy DSet) x y
 
-  exception Mismatch of string * string
+end
 
-  let check_eq ctx ty x y =
-    if not (eq ctx ty x y) then
-      let x = Pretty.show ctx ty x in
-      let y = Pretty.show ctx ty y in
-      raise (Mismatch(x, y))
+module Pretty : sig
+  open Domain
 
-  let check_sub ctx x y =
-    if not (sub ctx x y) then
-      let x = Pretty.show ctx (lazy DSet) x in
-      let y = Pretty.show ctx (lazy DSet) y in
-      raise (Mismatch(x, y))
+  (* Given ctx ⊢ x : ty, show ctx ty x pretty-prints x *)
+  val show : 'n Ctx.t -> 'n dl -> 'n dl -> string
+end = struct
+  open Domain
+  let ($) f x = lazy Eval.(f $ x)
+
+  let parens p s = if p then "(" ^ s ^ ")" else s
+
+  let rec go : 'n. bool -> 'n Ctx.t -> 'n dl -> 'n dl -> string
+    = fun p ctx ty x -> match Conv.force ctx x with
+    | DNe ne -> fst (go_ne p ctx ne)
+    | DSplit(dim, a, b) ->
+        let ctx_l = Option.get @@ Ctx.with_eqn ctx dim Zero in
+        let ctx_r = Option.get @@ Ctx.with_eqn ctx dim One in
+        let dim = show_dim ctx dim in
+        "[" ^ dim ^ " ↦ " ^ go false ctx_l ty a ^ " | "
+        ^ dim ^ " ↦ " ^ go false ctx_r ty b ^ "]"
+    | DIf _ -> failwith "unreachable"
+    | DSet -> "Set"
+    | DPi(a, b) ->
+        let v, ctx' = Ctx.with_var ctx b.name a in
+        parens p @@
+          "Π (" ^ b.name ^ " : " ^ go false ctx ty a ^ ") → "
+          ^ go false ctx' ty (b $ v)
+    | DLam f ->
+        let a, b = match Conv.force ctx ty with
+          | DPi(a, b) -> a, b
+          | _ -> failwith "internal type error" in
+        let v, ctx' = Ctx.with_var ctx f.name a in
+        parens p @@ "λ " ^ f.name ^ " → " ^ go false ctx' (b $ v) (f $ v)
+    | DPathP(i, ty, lhs, rhs) ->
+        let _, ctx' = Ctx.with_dim_var ctx i in
+        let lhs_ty = Sub.dl (Sub.app Zero) ty in
+        let rhs_ty = Sub.dl (Sub.app One) ty in
+        parens p @@
+          "pathp " ^ i ^ "." ^ go true ctx' (lazy DSet) ty
+            ^ " " ^ go true ctx lhs_ty lhs ^ " " ^ go true ctx rhs_ty rhs
+    | DDimAbs(i, body) ->
+        let _, ctx' = Ctx.with_dim_var ctx i in
+        let ty = match Conv.force ctx ty with
+          | DPathP(_, ty, _, _) -> ty
+          | _ -> failwith "internal type error" in
+        parens p @@ "λ " ^ i ^ " → " ^ go false ctx' ty body
+
+  and go_ne : 'n. bool -> 'n Ctx.t -> 'n dne -> string * 'n dl
+    = fun p ctx x -> match x with
+    | DVar(l, ty) -> List.nth (Ctx.tm_names ctx) (Ctx.lvl ctx - l - 1), ty
+    | DApp(f, x) ->
+        let f, fty = go_ne false ctx f in
+        let a, b = match Conv.force ctx fty with
+          | DPi(a, b) -> a, b
+          | _ -> failwith "internal type error" in
+        let str = parens p @@ f ^ " " ^ go true ctx a x in
+        str, (b $ x)
+    | DCoe { r; r'; ty0; ty1; a } ->
+        let a_ty = lazy (DSplit(r', ty0, ty1)) in
+        let res_ty = lazy (DSplit(r', ty0, ty1)) in
+        let whole_ty =
+          lazy (DSplit(DimVar 0
+               , Sub.dl Sub.shift_up ty0
+               , Sub.dl Sub.shift_up ty1)) in
+        let _, ctx' = Ctx.with_dim_var ctx "i" in
+        let str = parens p @@
+          "coe " ^ show_dim ctx r ^ " " ^ show_dim ctx r' ^ " i."
+          ^ go true ctx' whole_ty (lazy DSet) ^ " " ^ go true ctx a a_ty in
+        str, res_ty
+
+  and show_dim : 'n. 'n Ctx.t -> 'n dim -> string
+    = fun ctx d -> match d with
+    | Zero -> "0"
+    | One -> "1"
+    | DimVar idx -> List.nth (Ctx.dim_names ctx) idx
+
+  let show ctx ty x =
+    go false ctx ty x
 end
 
 module Tychk = struct
   open Domain
 
   exception TypeError of string
+
+  let check_eq ctx ty x y =
+    if not (Conv.eq ctx ty x y) then
+      let x = Pretty.show ctx ty x in
+      let y = Pretty.show ctx ty y in
+      raise (TypeError(x ^ " is different from " ^ y))
+
+  let check_sub ctx x y =
+    if not (Conv.sub ctx x y) then
+      let x = Pretty.show ctx (lazy DSet) x in
+      let y = Pretty.show ctx (lazy DSet) y in
+      raise (TypeError(x ^ " is not a subtype of " ^ y))
 
   (* the main check/infer loop! *)
   let rec check : 'n. 'n Ctx.t -> AST.exp -> 'n dl -> Core.tm =
@@ -810,12 +878,12 @@ module Tychk = struct
         let body = check ctx' body ty in
         let actual_lhs = lazy (Eval.eval (Dim Zero::Ctx.env ctx) body) in
         let actual_rhs = lazy (Eval.eval (Dim One ::Ctx.env ctx) body) in
-        Conv.check_eq ctx (Sub.dl (Sub.app Zero) ty) actual_lhs lhs;
-        Conv.check_eq ctx (Sub.dl (Sub.app One) ty) actual_rhs rhs;
+        check_eq ctx (Sub.dl (Sub.app Zero) ty) actual_lhs lhs;
+        check_eq ctx (Sub.dl (Sub.app One) ty) actual_rhs rhs;
         Core.DimAbs(name, body)
     | e, t ->
         let tm, t' = infer ctx e in
-        Conv.check_sub ctx t' (lazy t);
+        check_sub ctx t' (lazy t);
         tm
   
   and check_dim : 'n. 'n Ctx.t -> AST.exp -> Core.dim
@@ -851,23 +919,26 @@ module Tychk = struct
         let ty_r, ty_r' = ty_at r, ty_at r' in
         let a = check ctx a ty_r in
         Core.Coe(r, r', i, ty, a), ty_r'
-    | Com { s; r; r'; i; ty; lhs; rhs; a } ->
+    | Com { s; r; r'; ty; lhs; rhs; a } ->
         let r', r, s = check_dim ctx r', check_dim ctx r, check_dim ctx s in
-        let _, ctx' = Ctx.with_dim_var ctx i in
-        let ty = check ctx' ty (lazy DSet) in
+        let name = fst ty in
+        let _, ctx' = Ctx.with_dim_var ctx (fst ty) in
+        let ty = check ctx' (snd ty) (lazy DSet) in
         let ty_v = lazy (Eval.eval (Ctx.env ctx') ty) in
-        let s_v = Eval.eval_dim (Ctx.env ctx') s in
+        let s_v = Sub.dim Sub.shift_up @@ Eval.eval_dim (Ctx.env ctx) s in
         let r_v = Eval.eval_dim (Ctx.env ctx) r in
         let r'_v = Eval.eval_dim (Ctx.env ctx) r' in 
         let a_ty = Sub.dl (Sub.app r_v) ty_v in
         let res_ty = Sub.dl (Sub.app r'_v) ty_v in
         let a = check ctx a a_ty in
+        let _, ctx' = Ctx.with_dim_var ctx (fst lhs) in
         let lhs = match Ctx.with_eqn ctx' s_v Zero with
           | None -> print_endline "warning: wack"; Core.Abort
-          | Some ctx'' -> check ctx'' lhs ty_v in
+          | Some ctx'' -> check ctx'' (snd lhs) ty_v in
+        let _, ctx' = Ctx.with_dim_var ctx (fst rhs) in
         let rhs = match Ctx.with_eqn ctx' s_v One with
           | None -> print_endline "warning: wack"; Core.Abort
-          | Some ctx'' -> check ctx'' rhs ty_v in
+          | Some ctx'' -> check ctx'' (snd rhs) ty_v in
         (* coherence conditions:
           s=0 ⊢ a = lhs@r
           s=1 ⊢ a = rhs@r
@@ -876,12 +947,12 @@ module Tychk = struct
         let s_v = Eval.eval_dim (Ctx.env ctx) s in
         Option.iter (fun ctx ->
           let lhs = lazy (Eval.eval (Dim r_v::Ctx.env ctx) lhs) in
-          Conv.check_eq ctx a_ty lhs a_v) (Ctx.with_eqn ctx s_v Zero);
+          check_eq ctx a_ty lhs a_v) (Ctx.with_eqn ctx s_v Zero);
         Option.iter (fun ctx ->
           let rhs = lazy (Eval.eval (Dim r_v::Ctx.env ctx) rhs) in
-          Conv.check_eq ctx a_ty rhs a_v) (Ctx.with_eqn ctx s_v One);
+          check_eq ctx a_ty rhs a_v) (Ctx.with_eqn ctx s_v One);
 
-        Core.Com { s; r; r'; i; ty; lhs; rhs }, res_ty
+        Core.Com { s; r; r'; i = name; ty; lhs; rhs }, res_ty
 
     | Set -> Core.Set, lazy DSet
     | Pi(x, a, b) ->
@@ -899,6 +970,11 @@ module Tychk = struct
         let lhs = check ctx lhs ty0 in
         let rhs = check ctx rhs ty1 in
         Core.PathP(i, ty, lhs, rhs), lazy DSet
+    | Eq(x, y) ->
+        let x, ty = infer ctx x in
+        let _y = check ctx y ty in
+        (* Aaaaa need to be able to *quote*! *)
+        failwith "TODO gotta implement quote"
     | App(f, x) ->
         let f, f_ty = infer ctx f in
         begin match Conv.force ctx f_ty with
@@ -912,8 +988,178 @@ module Tychk = struct
               Core.DimApp(f, i), ty
           | _ -> raise (TypeError "that's not a function")
         end
-    | _ -> failwith "TODO"
+    | _ -> failwith "TODO (or maybe that's not a thing you could infer)"
 
 end
 
+module Parser : sig
+  exception ParseError of string
+
+  val parse : string -> AST.exp
+end = struct
+  open AST
+
+  exception ParseError of string
+
+  let parse s =
+    (* a hack but it works *)
+    let s = s ^ "\000" in
+
+    let rec many p i =
+      Option.fold ~none:([], i) ~some:(fun (x, i) ->
+        let xs, i = many p i in x :: xs, i) (p i) in
+    let definitely n = function
+      | Some x -> x
+      | None -> raise (ParseError("expected " ^ n)) in
+
+    let rec ws i =
+      if String.contains " \n\t" s.[i] then ws (i+1) else i
+    and end_of_ident i =
+      if 'a' <= s.[i] && s.[i] <= 'z'
+        || 'A' <= s.[i] && s.[i] <= 'Z'
+        || String.contains "-_" s.[i] then end_of_ident (i+1) else i
+
+    and try_ident i =
+      let l = end_of_ident i - i in
+      if l = 0 then None else Some(String.sub s i l, ws (i+l))
+
+    and reserved = ["let"]
+
+    and matches k i =
+      String.length s - i >= String.length k
+        && String.sub s i (String.length k) = k
+    and after_kw k i = ws (i + String.length k)
+
+    and str x i =
+      if matches x i then after_kw x i else raise (ParseError("expected " ^ x))
+
+    and try_atomic i =
+      if matches "0" i then
+        Some(Zero, ws (i+1))
+      else if matches "1" i then
+        Some(One, ws (i+1))
+      else if matches "(" i then
+        let i = after_kw "(" i in
+        let x, i = expr i in
+        let i = str ")" i in
+        Some(x, i)
+      else Option.bind (try_ident i) (fun (x, i) ->
+        if List.mem x reserved then None
+        else if x = "Set" then Some (Set, i)
+        else Some(Var x, i))
+
+    and binder i =
+      let dim, i = definitely "ident" (try_ident i) in
+      let i = str "." i in
+      let exp, i = definitely "expression" (try_atomic i) in
+      dim, exp, i
+
+    and app_expr i =
+      (* TODO clean this up (coe, com should be reserved words) *)
+      match try_atomic i with
+      | Some(Var "coe", i) ->
+          let r, i = definitely "dimension" (try_atomic i) in
+          let r', i = definitely "dimension" (try_atomic i) in
+          let name, ty, i = binder i in
+          let a, i = definitely "expression" (try_atomic i) in
+          Coe { r; r'; i = name; ty; a }, i
+      | Some(Var "com", i) ->
+          let i = str "<" i in
+          let s, i = definitely "dimension" (try_atomic i) in
+          let i = str ">" i in
+          let r, i = definitely "dimension" (try_atomic i) in
+          let r', i = definitely "dimension" (try_atomic i) in
+          let ty_dim, ty, i = binder i in 
+          let lhs_dim, lhs, i = binder i in
+          let rhs_dim, rhs, i = binder i in
+          let a, i = definitely "expression" (try_atomic i) in
+          Com { s; r; r'; ty = ty_dim, ty
+              ; lhs = lhs_dim, lhs; rhs = rhs_dim, rhs; a }, i
+      | Some(Var "pathp", i) ->
+          let dim, ty, i = binder i in
+          let lhs, i = definitely "expression" (try_atomic i) in
+          let rhs, i = definitely "expression" (try_atomic i) in
+          PathP(dim, ty, lhs, rhs), i
+      | Some(hd, i) ->
+          let args, i = many try_atomic i in
+          List.fold_left (fun f x -> App(f, x)) hd args, i
+      | None ->
+          raise (ParseError "expecting expression")
+
+    and arrow i =
+      if matches "→" i then after_kw "→" i else str "->" i
+    and times i =
+      if matches "×" i then after_kw "×" i else str "*" i
+
+    and rest_of_lam i =
+      match try_ident i with
+      | Some(x, i) ->
+          let body, i = rest_of_lam i in
+          Lam(x, body), i
+      | None -> expr (arrow i)
+
+    and telescope c k i =
+      if matches "(" i then
+        let i = after_kw "(" i in
+        let names, i = many try_ident i in
+        let i = str ":" i in
+        let ty, i = expr i in
+        let i = str ")" i in
+        let rest, i = telescope c k i in
+        List.fold_right (fun name r -> c name ty r) names rest, i
+      else k i
+
+    and expr_no_annot i =
+      if matches "Σ" i then
+        let i = after_kw "Σ" i in
+        telescope (fun x a b -> Sigma(x, a, b)) (fun i -> expr (times i)) i
+      else if matches "Π" i then
+        let i = after_kw "Π" i in
+        telescope (fun x a b -> Pi(x, a, b)) (fun i -> expr (arrow i)) i
+      else if matches "∀" i then
+        let i = after_kw "∀" i in
+        telescope (fun x a b -> Pi(x, a, b)) (fun i -> expr (arrow i)) i
+      else if matches "λ" i then
+        rest_of_lam (after_kw "λ" i)
+      else if matches "\\" i then
+        rest_of_lam (after_kw "\\" i)
+      else match try_ident i with
+      | Some("let", i) ->
+          let name, i = definitely "name" (try_ident i) in
+          let e, i = expr (str "=" i) in
+          let i = str ";" i in
+          let body, i = expr i in
+          Let(name, e, body), i
+      | _ -> app_expr i
+
+    and expr i =
+      let e, i = expr_no_annot i in
+      if matches ":" i then
+        let i = after_kw ":" i in
+        let ty, i = expr i in
+        Annot(e, ty), i
+      else if matches "≡" i then
+        let i = after_kw "≡" i in
+        let rhs, i = expr_no_annot i in
+        Eq(e, rhs), i
+      else e, i in
+
+    let e, i = expr 0 in
+    if i + 1 = String.length s then
+      e
+    else raise (ParseError "didn't parse everything")
+end
+
+let main () =
+  let ctx = Ctx.initial_ctx in
+  try while true do
+    print_string "> "; Format.print_flush ();
+    let line = input_line stdin in
+    let ast = Parser.parse line in
+    let _, ty = Tychk.infer ctx ast in
+    print_endline "well-typed!";
+    print_endline ("it : " ^ Pretty.show ctx (lazy Domain.DSet) ty)
+  done with End_of_file -> ()
+
+let () = main ()
 
