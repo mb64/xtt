@@ -783,8 +783,8 @@ end = struct
         let ctx_l = Option.get @@ Ctx.with_eqn ctx dim Zero in
         let ctx_r = Option.get @@ Ctx.with_eqn ctx dim One in
         let dim = show_dim ctx dim in
-        "[" ^ dim ^ " ↦ " ^ go false ctx_l ty a ^ " | "
-        ^ dim ^ " ↦ " ^ go false ctx_r ty b ^ "]"
+        "[" ^ dim ^ "=0 ↦ " ^ go false ctx_l ty a ^ " | "
+        ^ dim ^ "=1 ↦ " ^ go false ctx_r ty b ^ "]"
     | DIf _ -> failwith "unreachable"
     | DSet -> "Set"
     | DPi(a, b) ->
@@ -832,7 +832,7 @@ end = struct
         let _, ctx' = Ctx.with_dim_var ctx "i" in
         let str = parens p @@
           "coe " ^ show_dim ctx r ^ " " ^ show_dim ctx r' ^ " i."
-          ^ go true ctx' whole_ty (lazy DSet) ^ " " ^ go true ctx a a_ty in
+          ^ go true ctx' (lazy DSet) whole_ty ^ " " ^ go true ctx a_ty a in
         str, res_ty
 
   and show_dim : 'n. 'n Ctx.t -> 'n dim -> string
@@ -1026,7 +1026,7 @@ end = struct
     and end_of_ident i =
       if 'a' <= s.[i] && s.[i] <= 'z'
         || 'A' <= s.[i] && s.[i] <= 'Z'
-        || String.contains "-_" s.[i] then end_of_ident (i+1) else i
+        || String.contains "-_'" s.[i] then end_of_ident (i+1) else i
 
     and try_ident i =
       let l = end_of_ident i - i in
@@ -1155,15 +1155,20 @@ end = struct
     else raise (ParseError "didn't parse everything")
 end
 
-let repl () =
+let interact fn input =
   let ctx = Ctx.initial_ctx in
+  let ast = Parser.parse input in
+  let tm, ty = Tychk.infer ctx ast in
+  print_endline (fn ^ " is well-typed!");
+  print_endline ("it : " ^ Pretty.show ctx (lazy Domain.DSet) ty);
+  let x = lazy (Eval.eval (Ctx.env ctx) tm) in
+  print_endline ("it = " ^ Pretty.show ctx ty x)
+
+let repl () =
   try while true do
     print_string "> "; Format.print_flush ();
     let line = input_line stdin in
-    let ast = Parser.parse line in
-    let _, ty = Tychk.infer ctx ast in
-    print_endline "<stdin> is well-typed!";
-    print_endline ("it : " ^ Pretty.show ctx (lazy Domain.DSet) ty)
+    interact "<stdin>" line
   done with End_of_file -> ()
 
 (* From stackoverflow *)
@@ -1175,12 +1180,7 @@ let read_file filename =
 let main () =
   if Array.length Sys.argv > 1 then
     let fn = Sys.argv.(1) in
-    let input = read_file fn in
-    let ast = Parser.parse input in
-    let ctx = Ctx.initial_ctx in
-    let _, ty = Tychk.infer ctx ast in
-    print_endline (fn ^ " is well-typed!");
-    print_endline ("it : " ^ Pretty.show ctx (lazy Domain.DSet) ty)
+    interact fn (read_file fn)
   else repl ()
 
 let () = main ()
