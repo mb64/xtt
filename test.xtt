@@ -31,12 +31,11 @@ let regularity-test = (λ A p → refl A)
   : Π (A : Set) (p : pathp i.Set A A) (x : A)
   → pathp i.A x (coe 0 1 i.(p i) x);
 
--- TODO: this does not compute right. Need to use the Internal Injectivity
--- during evaluation
+-- It makes use of Internal Injectivity during evaluation!
 let coe-pi-test = (λ A A' B B' p f → coe 0 1 i.(p i) f)
   : Π (A A' B B' : Set) (p : pathp i.Set (Π(_: A) → B) (Π(_: A') → B'))
       (f : Π(_ : A) → B)
   → Π(_ : A') → B';
 
-id
+coe-pi-test
 

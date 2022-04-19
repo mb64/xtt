@@ -209,6 +209,8 @@ end
 module Eval : sig
   open Domain
 
+  val lam_to_clos : 'n dl -> 'n clos
+
   val ($) : 'n clos -> 'n dl -> 'n d
 
   val type_of_ne : 'n dne -> 'n d
@@ -246,7 +248,14 @@ end = struct
     go x
   let bind x f = bind_with_sub Sub.id x f
 
-  let bind_shift_down : 'n. 'n s d -> ('n s d -> 'n d) -> 'n d
+  let lam_to_clos lam =
+    { name = "x"
+    ; env = [Val lam]
+    ; body = App(Var 1, Var 0) }
+
+  (* also use internal injectivity to merge some things that are the same, so
+     coe can match on it *)
+  let rec bind_shift_down : 'n. 'n s d -> ('n s d -> 'n d) -> 'n d
     = fun x f ->
     let rec go = function
       | DIf { cond; yes; no } ->
@@ -255,13 +264,31 @@ end = struct
               ; no = Lazy.map go no }
       | DSplit(Zero, l, r) -> go (Lazy.force l) (* lol *)
       | DSplit(One, l, r) -> go (Lazy.force r) (* lol *)
-      | DSplit(DimVar 0, l, r) as x -> f x
+      | DSplit(DimVar 0, l, r) ->
+          bind (Sub.d (Sub.app Zero) (Lazy.force l)) (fun l ->
+          bind (Sub.d (Sub.app Zero) (Lazy.force r)) (fun r ->
+          let tm =
+            DSplit(DimVar 0
+                  , lazy (Sub.d Sub.shift_up l)
+                  , lazy (Sub.d Sub.shift_up r)) in
+          match l, r with
+          | DSet, DSet -> f DSet
+          | DPi _, DPi _ ->
+              let dom = lazy (dom_ty tm) in
+              let cod = lazy (cod_ty tm) in
+              f (DPi(dom, lam_to_clos cod))
+          | DPathP(i, _, _, _), DPathP _ ->
+              let a = lazy (un_dim_abs (lazy (pathp_ty_path tm))) in
+              let lhs = lazy (pathp_lhs tm) in
+              let rhs = lazy (pathp_rhs tm) in
+              f (DPathP(i, a, lhs, rhs))
+          | _ -> f tm))
       | DSplit(DimVar n, l, r) ->
           DSplit(DimVar (n-1), Lazy.map go l, Lazy.map go r)
       | x -> f x in
     go x
 
-  let rec ($) : 'n. 'n clos -> 'n dl -> 'n d
+  and ($) : 'n. 'n clos -> 'n dl -> 'n d
     = fun clos x -> eval (Val x::clos.env) clos.body
 
   and type_of_ne : 'n. 'n dne -> 'n d = function
@@ -639,11 +666,6 @@ module Conv : sig
 end = struct
   open Domain
   
-  let lam_to_clos lam =
-    { name = "x"
-    ; env = [Val lam]
-    ; body = App(Var 1, Var 0) }
-
   (* Resolve DIf/DSplit conditions and apply INTERNAL INJECTIVITY! *)
   let rec force : 'n. 'n Ctx.t -> 'n dl -> 'n d
     = fun ctx x -> match Lazy.force x with
@@ -663,14 +685,14 @@ end = struct
           | DPi _, DPi _ ->
               let dom = lazy (Eval.dom_ty tm) in
               let cod = lazy (Eval.cod_ty tm) in
-              DPi(dom, lam_to_clos cod)
+              DPi(dom, Eval.lam_to_clos cod)
           | DPathP _, DPathP _ ->
               let a = lazy (Eval.un_dim_abs (lazy (Eval.pathp_ty_path tm))) in
               let lhs = lazy (Eval.pathp_lhs tm) in
               let rhs = lazy (Eval.pathp_rhs tm) in
               DPathP("i", a, lhs, rhs)
           (* TODO: extend this when extending the domain *)
-          | _ -> DSplit(dim, lazy l, lazy r)
+          | _ -> tm
         end
     | x -> x
 
