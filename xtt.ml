@@ -262,8 +262,8 @@ end = struct
           DIf { cond = Forall_i cond
               ; yes = Lazy.map go yes
               ; no = Lazy.map go no }
-      | DSplit(Zero, l, r) -> go (Lazy.force l) (* lol *)
-      | DSplit(One, l, r) -> go (Lazy.force r) (* lol *)
+      | DSplit(Zero, l, _) -> go (Lazy.force l) (* lol *)
+      | DSplit(One, _, r) -> go (Lazy.force r) (* lol *)
       | DSplit(DimVar 0, l, r) ->
           bind (Sub.d (Sub.app Zero) (Lazy.force l)) (fun l ->
           bind (Sub.d (Sub.app Zero) (Lazy.force r)) (fun r ->
@@ -381,20 +381,20 @@ end = struct
         end
     | Let(_, x, body) ->
         eval (Val (lazy (eval env x))::env) body
-    | Coe(r, r', i, ty, a) ->
+    | Coe(r, r', _, ty, a) ->
         let env' = Dim (DimVar 0) :: Sub.env Sub.shift_up env in
         let r, r' = eval_dim env r, eval_dim env r' in
         let ty = lazy (eval env' ty) in
         let a = lazy (eval env a) in
         coe r r' ty a
-    | Com { s; r; r'; i; ty; lhs; rhs } ->
+    | Com { s; r; r'; i = _; ty; lhs; rhs } ->
         let env' = Dim (DimVar 0) :: Sub.env Sub.shift_up env in
         let s, r, r' = eval_dim env s, eval_dim env r, eval_dim env r' in
         let ty = lazy (eval env' ty) in
         let lhs = lazy (eval env' lhs) in
         let rhs = lazy (eval env' rhs) in
         com s r r' ty lhs rhs
-    | HCom { s; r'; i; lhs; rhs } ->
+    | HCom { s; r'; i = _; lhs; rhs } ->
         let env' = Dim (DimVar 0) :: Sub.env Sub.shift_up env in
         let s, r' = eval_dim env s, eval_dim env r' in
         let lhs = lazy (eval env' lhs) in
@@ -462,11 +462,11 @@ end = struct
 
             (* λ x. coe r r' i.B(coe r' i (i.A) x) (a(coe r' r i.A x)) *)
             let open Core in
-            let arg, r, r', a, b, x =
+            let arg, r, r', _a, _b, x =
               Var 0, DimVar 1, DimVar 2, Var 3, Var 4, Var 5 in
             let body = Coe(r, r', "i",
               begin
-                let i, arg, r, r', a, b, x =
+                let i, arg, _r, r', _a, b, _x =
                   DimVar 0, Var 1, DimVar 2, DimVar 3, Var 4, Var 5, Var 6 in
                 App(DimApp(b, i), Coe(r', i, "i", DimApp(Var 5, DimVar 0), arg))
               end,
@@ -502,7 +502,7 @@ end = struct
   *)
   and com
     : 'n. 'n dim -> 'n dim -> 'n dim -> 'n s dl -> 'n s dl -> 'n s dl -> 'n d
-    = fun s r r' ty lhs rhs ->
+    = fun s _r r' ty lhs rhs ->
     let ty_up = Sub.dl Sub.shift_up ty in
     let r'_up = Sub.dim Sub.shift_up r' in
     let coerce_it x = lazy (coe (DimVar 0) r'_up ty_up x) in
@@ -896,7 +896,7 @@ module Tychk = struct
         let ctx' = Ctx.with_defn ctx x ty value in
         Core.Let(x, tm, check ctx' b (lazy t))
     | Lam(name, body), DPathP(_, ty, lhs, rhs) ->
-        let i, ctx' = Ctx.with_dim_var ctx name in
+        let _, ctx' = Ctx.with_dim_var ctx name in
         let body = check ctx' body ty in
         let actual_lhs = lazy (Eval.eval (Dim Zero::Ctx.env ctx) body) in
         let actual_rhs = lazy (Eval.eval (Dim One ::Ctx.env ctx) body) in
@@ -993,7 +993,7 @@ module Tychk = struct
         let rhs = check ctx rhs ty1 in
         Core.PathP(i, ty, lhs, rhs), lazy DSet
     | Eq(x, y) ->
-        let x, ty = infer ctx x in
+        let _x, ty = infer ctx x in
         let _y = check ctx y ty in
         (* Aaaaa need to be able to *quote*! *)
         failwith "TODO gotta implement quote"

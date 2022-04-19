@@ -1,4 +1,3 @@
 (executable
- (name cubes)
- (modules cubes extra)
- (libraries angstrom))
+ (name xtt)
+ (modules xtt))
