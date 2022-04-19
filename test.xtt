@@ -15,6 +15,17 @@ let trans = (λ A x y z p q i → com<i> 0 1 j.A j.x j.(q j) (p i))
   : Π (A : Set) (x y z : A) (p : pathp i.A x y) (q : pathp i.A y z)
   → pathp i.A x z;
 
+let J = (λ A x y P base p →
+  coe 0 1 i.(P (p i) (λ j → com<j> 0 i i.A i.x i.(p i) x)) base)
+  : Π (A : Set) (x y : A) (P : Π (y : A) (_ : pathp _.A x y) → Set)
+      (base : P x (refl A x)) (p : pathp _.A x y)
+  → P y p;
+
+let J-computes-definitionally = (λ A x P base i → base)
+  : Π (A : Set) (x : A) (P : Π (y : A) (_ : pathp _.A x y) → Set)
+      (base : P x (refl A x))
+  → pathp i.(P x (refl A x)) (J A x x P base (refl A x)) base;
+
 -- Definitional UIP!
 let UIP_type = Π (A B : Set) (Ty : pathp i.Set A B) (x : A) (y : B)
   (p q : pathp i.(Ty i) x y) → pathp i.(pathp i.(Ty i) x y) p q;
