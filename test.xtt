@@ -37,6 +37,10 @@ let eta-test = (λ A B f i → f)
   : Π (A B : Set) (f : Π(_ : A) → B)
   → pathp i.(Π(_ : A) → B) f (λ x → f x);
 
+let pair-eta-test = (λ A B p i → p)
+  : Π (A B : Set) (p : Σ(_ : A) × B)
+  → pathp i.(Σ(_ : A) × B) p (pair (fst p) (snd p));
+
 -- It computes!
 let regularity-test = (λ A p → refl A)
   : Π (A : Set) (p : pathp i.Set A A) (x : A)

@@ -21,10 +21,10 @@ it = Π (A : Set) → Π (x : A) → pathp i.A x x
 ## Features
 
  - Pi types
+ - Sigma types
  - Path types
  - `coe`, `com`
- - Yeah that's about it, sigmas and inductives (naturals, booleans) are still
-   TO DO
+ - Yeah that's about it, inductives (naturals, booleans) are still TO DO
 
 [xtt1]: https://jozefg.github.io/papers/a-cubical-language-for-bishop-sets.pdf
 [xtt2]: https://jozefg.github.io/papers/2019-xtt.pdf

@@ -34,6 +34,7 @@ module AST = struct
     (* lhs ≡ rhs *)
     | Eq of exp * exp
     | Lam of name * exp
+    | AnnLam of name * ty * exp
     | App of exp * exp
     (* Pairs *)
     | Sigma of name * ty * ty
@@ -75,6 +76,11 @@ module Core = struct
     | PathP of name * ty binds * tm * tm
     | DimAbs of name * tm binds
     | DimApp of tm * dim
+    (* Pairs *)
+    | Sigma of name * ty * ty binds
+    | Pair of tm * tm
+    | Fst of tm
+    | Snd of tm
 end
 
 module Domain = struct
@@ -101,8 +107,8 @@ module Domain = struct
     | DLam of 'n clos
     | DPathP of name * 'n s dl * 'n dl * 'n dl
     | DDimAbs of name * 'n s dl
-    (* | DSigma of 'n dl * 'n clos *)
-    (* | DPair of 'n dl * 'n dl *)
+    | DSigma of 'n dl * 'n clos
+    | DPair of 'n dl * 'n dl
 
   and 'n dne =
     | DVar of lvl * 'n dl
@@ -111,8 +117,8 @@ module Domain = struct
               (* invariant: ty0 ≠ ty1 (or else it would compute) *)
               ; ty0: 'n dl; ty1: 'n dl
               ; a: 'n dl }
-    (* | DFst of 'n dne *)
-    (* | DSnd of 'n dne *)
+    | DFst of 'n dne
+    | DSnd of 'n dne
 
   and 'n env_item =
     | Dim of 'n dim
@@ -171,6 +177,10 @@ module Domain = struct
           DPathP(i, dl (extend s) ty, dl s lhs, dl s rhs)
       | DDimAbs(i, body) ->
           DDimAbs(i, dl (extend s) body)
+      | DSigma(a, b) ->
+          DSigma(dl s a, clos s b)
+      | DPair(x, y) ->
+          DPair(dl s x, dl s y)
 
     and dl : 'n 'm. ('n, 'm) sub -> 'n dl -> 'm dl
       = fun s dl -> Lazy.map (d s) dl
@@ -183,6 +193,8 @@ module Domain = struct
           DCoe { r = dim s r; r' = dim s r'
                ; ty0 = dl s ty0; ty1 = dl s ty1
                ; a = dl s a }
+      | DFst x -> DFst (dne s x)
+      | DSnd x -> DSnd (dne s x)
 
     and cond : 'n 'm. ('n, 'm) sub -> 'n cond -> 'm cond
       = fun s c -> match c with
@@ -217,8 +229,8 @@ module Eval : sig
 
   val app : 'n dl -> 'n dl -> 'n d
   val dim_app : 'n dl -> 'n dim -> 'n d
-  (* val fst : 'n dl -> 'n d *)
-  (* val snd : 'n dl -> 'n d *)
+  val fst : 'n dl -> 'n d
+  val snd : 'n dl -> 'n d
 
   val un_dim_abs : 'n dl -> 'n s d
 
@@ -229,6 +241,8 @@ module Eval : sig
   val pathp_ty_path : 'n d -> 'n d
   val pathp_lhs : 'n d -> 'n d
   val pathp_rhs : 'n d -> 'n d
+  val fst_ty : 'n d -> 'n d
+  val snd_ty : 'n d -> 'n d
 
   val eval : 'n env -> Core.tm -> 'n d
   val eval_dim : 'n env -> Core.dim -> 'n dim
@@ -282,6 +296,10 @@ end = struct
               let lhs = lazy (pathp_lhs tm) in
               let rhs = lazy (pathp_rhs tm) in
               f (DPathP(i, a, lhs, rhs))
+          | DSigma _, DSigma _ ->
+              let fst = lazy (fst_ty tm) in
+              let snd = lazy (snd_ty tm) in
+              f (DSigma(fst, lam_to_clos snd))
           | _ -> f tm))
       | DSplit(DimVar n, l, r) ->
           DSplit(DimVar (n-1), Lazy.map go l, Lazy.map go r)
@@ -300,6 +318,16 @@ end = struct
         end
     | DCoe { r'; ty0; ty1; _ } ->
         DSplit(r', ty0, ty1)
+    | DFst ne -> begin
+        match type_of_ne ne with
+        | DSigma(a, _) -> Lazy.force a
+        | _ -> failwith "internal type error"
+        end
+    | DSnd ne -> begin
+        match type_of_ne ne with
+        | DSigma(_, b) -> b $ lazy (DNe (DFst ne))
+        | _ -> failwith "internal type error"
+        end
 
   and app : 'n. 'n dl -> 'n dl -> 'n d
     = fun f x -> bind (Lazy.force f) (function
@@ -337,6 +365,18 @@ end = struct
         end
     | _ -> failwith "internal type error"
 
+  and fst : 'n. 'n dl -> 'n d
+    = fun x -> bind (Lazy.force x) (function
+      | DPair(x, _) -> Lazy.force x
+      | DNe ne -> DNe (DFst ne)
+      | _ -> failwith "internal type error")
+
+  and snd : 'n. 'n dl -> 'n d
+    = fun x -> bind (Lazy.force x) (function
+      | DPair(_, y) -> Lazy.force y
+      | DNe ne -> DNe (DSnd ne)
+      | _ -> failwith "internal type error")
+
   and dom_ty : 'n. 'n d -> 'n d
     = fun x -> bind x (function
       | DPi(a, _) -> Lazy.force a
@@ -370,6 +410,16 @@ end = struct
   and pathp_rhs : 'n. 'n d -> 'n d
     = fun x -> bind x (function
       | DPathP(_, _, _, rhs) -> Lazy.force rhs
+      | _ -> failwith "internal type error")
+
+  and fst_ty : 'n. 'n d -> 'n d
+    = fun x -> bind x (function
+      | DSigma(a, _) -> Lazy.force a
+      | _ -> failwith "internal type error")
+
+  and snd_ty : 'n. 'n d -> 'n d
+    = fun x -> bind x (function
+      | DSigma(_, b) -> DLam b
       | _ -> failwith "internal type error")
 
   and eval : 'n. 'n env -> Core.tm -> 'n d
@@ -426,6 +476,14 @@ end = struct
         DDimAbs(name, lazy (eval env' body))
     | DimApp(p, i) ->
         dim_app (lazy (eval env p)) (eval_dim env i)
+    | Sigma(name, a, b) ->
+        DSigma(lazy (eval env a), { name; env; body = b })
+    | Pair(x, y) ->
+        DPair(lazy (eval env x), lazy (eval env y))
+    | Fst tm ->
+        fst (lazy (eval env tm))
+    | Snd tm ->
+        snd (lazy (eval env tm))
 
   and eval_dim : 'n. 'n env -> Core.dim -> 'n dim
     = fun env d -> match d with
@@ -472,6 +530,17 @@ end = struct
               end,
               App(x, Coe(r', r, "i", DimApp(Var 4, DimVar 0), arg))) in
             DLam { name = "x"; env; body }
+        | DSigma(a, b) ->
+            (* I think this impl of coe means I need to have eta for pairs *)
+            let fst_x = lazy (fst x) in
+            let fst = lazy (coe r r' a fst_x) in
+            let shift: ('n, 'n s) sub = Sub.shift_up in
+            let shift' = Sub.extend shift in
+            let b_of_fst = lazy (b $ lazy
+              (coe (Sub.dim shift r) (DimVar 0) (Sub.dl shift' a)
+                (Sub.dl shift fst_x))) in
+            let snd = lazy (coe r r' b_of_fst (lazy (snd x))) in
+            DPair(fst, snd)
         | DPathP(j, ty, lhs, rhs) ->
             DDimAbs(j, lazy (
               let shift: ('n, 'n s) sub = Sub.shift_up in
@@ -691,6 +760,10 @@ end = struct
               let lhs = lazy (Eval.pathp_lhs tm) in
               let rhs = lazy (Eval.pathp_rhs tm) in
               DPathP("i", a, lhs, rhs)
+          | DSigma _, DSigma _ ->
+              let fst = lazy (Eval.fst_ty tm) in
+              let snd = lazy (Eval.snd_ty tm) in
+              DSigma(fst, Eval.lam_to_clos snd)
           (* TODO: extend this when extending the domain *)
           | _ -> tm
         end
@@ -726,6 +799,12 @@ end = struct
         else if not (eq ctx (lazy DSet) ty1_x ty1_y) then None
         else if not (eq ctx (lazy (DSplit(rx, ty0_x, ty1_x))) ax ay) then None
         else Some (lazy (DSplit(r'_x, ty0_x, ty0_y)))
+    | DFst x, DFst y ->
+        Option.map (Lazy.map Eval.fst_ty) (conv_ne ctx x y)
+    | DSnd x, DSnd y ->
+        Option.map (fun ty ->
+          lazy Eval.(app (Lazy.map snd_ty ty) (lazy (DNe (DFst x)))))
+          (conv_ne ctx x y)
     | _ -> None
 
   (* hooray for *boundary separation* *)
@@ -772,6 +851,11 @@ end = struct
               let ty_l = Sub.dl (Sub.app Zero) xa in
               let ty_r = Sub.dl (Sub.app One) xa in
               eq ctx ty_l xl yl && eq ctx ty_r xr yr
+        | DSigma(xa, xb), DSigma(ya, yb) ->
+            let open Eval in
+            eq ctx (lazy DSet) xa ya &&
+              let v, ctx' = Ctx.with_var ctx xb.name xa in
+              eq ctx' (lazy DSet) (lazy (xb $ v)) (lazy (yb $ v))
         | _ -> false
         end
     | DPi(a, b) ->
@@ -779,6 +863,10 @@ end = struct
         let open Eval in
         eq ctx' (lazy (b $ v)) (lazy (app x v)) (lazy (app y v))
     | DPathP _ -> true (* lol definitional UIP *)
+    | DSigma(a, b) ->
+        let open Eval in
+        eq ctx a (lazy (fst x)) (lazy (fst y))
+          && eq ctx (lazy (b $ x)) (lazy (snd x)) (lazy (snd y))
     | _ -> failwith "internal error: not a type"
 
   (* TODO *)
@@ -833,6 +921,16 @@ end = struct
           | DPathP(_, ty, _, _) -> ty
           | _ -> failwith "internal type error" in
         parens p @@ "λ " ^ i ^ " → " ^ go false ctx' ty body
+    | DSigma(a, b) ->
+        let v, ctx' = Ctx.with_var ctx b.name a in
+        parens p @@
+          "Σ (" ^ b.name ^ " : " ^ go false ctx ty a ^ ") → "
+          ^ go false ctx' ty (b $ v)
+    | DPair(x, y) ->
+        let a, b = match Conv.force ctx ty with
+          | DSigma(a, b) -> a, (b $ x)
+          | _ -> failwith "internal type error" in
+        "(" ^ go false ctx a x ^ ", " ^ go false ctx b y ^ ")"
 
   and go_ne : 'n. bool -> 'n Ctx.t -> 'n dne -> string * 'n dl
     = fun p ctx x -> match x with
@@ -856,6 +954,20 @@ end = struct
           "coe " ^ show_dim ctx r ^ " " ^ show_dim ctx r' ^ " i."
           ^ go true ctx' (lazy DSet) whole_ty ^ " " ^ go true ctx a_ty a in
         str, res_ty
+    | DFst ne ->
+        let str, ty = go_ne true ctx ne in
+        let str = parens p @@ "fst " ^ str in
+        let ty = lazy (match Conv.force ctx ty with
+          | DSigma(a, _) -> Lazy.force a
+          | _ -> failwith "internal type error") in
+        str, ty
+    | DSnd ne ->
+        let str, ty = go_ne true ctx ne in
+        let str = parens p @@ "snd " ^ str in
+        let ty = lazy (match Conv.force ctx ty with
+          | DSigma(_, b) -> Eval.(b $ lazy (DNe (DFst ne)))
+          | _ -> failwith "internal type error") in
+        str, ty
 
   and show_dim : 'n. 'n Ctx.t -> 'n dim -> string
     = fun ctx d -> match d with
@@ -903,6 +1015,11 @@ module Tychk = struct
         check_eq ctx (Sub.dl (Sub.app Zero) ty) actual_lhs lhs;
         check_eq ctx (Sub.dl (Sub.app One) ty) actual_rhs rhs;
         Core.DimAbs(name, body)
+    | Pair(x, y), DSigma(a, b) ->
+        let x = check ctx x a in
+        let x_v = lazy (Eval.eval (Ctx.env ctx) x) in
+        let y = check ctx y (lazy Eval.(b $ x_v)) in
+        Core.Pair(x, y)
     | e, t ->
         let tm, t' = infer ctx e in
         check_sub ctx t' (lazy t);
@@ -992,6 +1109,11 @@ module Tychk = struct
         let lhs = check ctx lhs ty0 in
         let rhs = check ctx rhs ty1 in
         Core.PathP(i, ty, lhs, rhs), lazy DSet
+    | Sigma(x, a, b) ->
+        let a = check ctx a (lazy DSet) in
+        let _, ctx' = Ctx.with_var ctx x (lazy (Eval.eval (Ctx.env ctx) a)) in
+        let b = check ctx' b (lazy DSet) in
+        Core.Sigma(x, a, b), lazy DSet
     | Eq(x, y) ->
         let _x, ty = infer ctx x in
         let _y = check ctx y ty in
@@ -1009,6 +1131,27 @@ module Tychk = struct
               let ty = Sub.dl (Sub.app (Eval.eval_dim (Ctx.env ctx) i)) a in
               Core.DimApp(f, i), ty
           | _ -> raise (TypeError "that's not a function")
+        end
+    | AnnLam(name, ty, body) ->
+        let ty = check ctx ty (lazy DSet) in
+        let ty = lazy (Eval.eval (Ctx.env ctx) ty) in
+        let _, ctx' = Ctx.with_var ctx name ty in
+        let _body, _body_ty = infer ctx' body in
+        failwith "TODO gotta implement quote!"
+    | Fst x ->
+        let x, ty = infer ctx x in
+        begin match Conv.force ctx ty with
+          | DSigma(a, _) -> Core.Fst x, a
+          | _ -> raise (TypeError "that's not a pair")
+        end
+    | Snd x ->
+        let x, ty = infer ctx x in
+        begin match Conv.force ctx ty with
+          | DSigma(_, b) ->
+              let open Eval in
+              let fst_x = lazy (fst (lazy (eval (Ctx.env ctx) x))) in
+              Core.Snd x, lazy (b $ fst_x)
+          | _ -> raise (TypeError "that's not a pair")
         end
     | _ -> failwith "TODO (or maybe that's not a thing you could infer)"
 
@@ -1108,6 +1251,16 @@ end = struct
           let lhs, i = definitely "expression" (try_atomic i) in
           let rhs, i = definitely "expression" (try_atomic i) in
           PathP(dim, ty, lhs, rhs), i
+      | Some(Var "fst", i) ->
+          let x, i = definitely "expression" (try_atomic i) in
+          Fst(x), i
+      | Some(Var "snd", i) ->
+          let x, i = definitely "expression" (try_atomic i) in
+          Snd(x), i
+      | Some(Var "pair", i) ->
+          let x, i = definitely "expression" (try_atomic i) in
+          let y, i = definitely "expression" (try_atomic i) in
+          Pair(x, y), i
       | Some(hd, i) ->
           let args, i = many try_atomic i in
           List.fold_left (fun f x -> App(f, x)) hd args, i
@@ -1120,7 +1273,15 @@ end = struct
       if matches "×" i then after_kw "×" i else str "*" i
 
     and rest_of_lam i =
-      match try_ident i with
+      if matches "(" i then
+        let i = after_kw "(" i in
+        let x, i = definitely "ident" (try_ident i) in
+        let i = str ":" i in
+        let ty, i = expr i in
+        let i = str ")" i in
+        let body, i = rest_of_lam i in
+        AnnLam(x, ty, body), i
+      else match try_ident i with
       | Some(x, i) ->
           let body, i = rest_of_lam i in
           Lam(x, body), i
