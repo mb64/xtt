@@ -32,6 +32,10 @@ let UIP_type = Π (A B : Set) (Ty : pathp i.Set A B) (x : A) (y : B)
 
 let uip = (λ A B Ty x y p q i → p) : UIP_type;
 
+let second-proj = (λ A x y pf i → snd (pf i))
+  : Π (A : Set) (x y : A) (pf : pathp i.(Σ(B : Set) * B) (pair A x) (pair A y))
+  → pathp i.A x y;
+
 -- Eta!
 let eta-test = (λ A B f i → f)
   : Π (A B : Set) (f : Π(_ : A) → B)
