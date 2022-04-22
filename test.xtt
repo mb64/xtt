@@ -26,6 +26,19 @@ let J-computes-definitionally = (λ A x P base i → base)
       (base : P x (refl A x))
   → pathp i.(P x (refl A x)) (J A x x P base (refl A x)) base;
 
+let pathp-to-coe-path
+  = (λ A B P x y p i →
+    com<i> 0 1 j.(P j) j.(coe 0 j i.(P i) x) j.(p j) x)
+  : Π (A B : Set) (P : pathp i.Set A B) (x : A) (y : B) (p : pathp i.(P i) x y)
+  → pathp i.B (coe 0 1 i.(P i) x) y;
+
+let coe-path-to-pathp
+  = (λ A B P x y p i →
+    com<i> 0 1 j.(P i) j.x j.(p j) (coe 0 i i.(P i) x))
+  : Π (A B : Set) (P : pathp i.Set A B) (x : A) (y : B) 
+      (p : pathp i.B (coe 0 1 i.(P i) x) y)
+  → pathp i.(P i) x y;
+
 -- Definitional UIP!
 let UIP_type = Π (A B : Set) (Ty : pathp i.Set A B) (x : A) (y : B)
   (p q : pathp i.(Ty i) x y) → pathp i.(pathp i.(Ty i) x y) p q;
@@ -56,5 +69,22 @@ let coe-pi-test = (λ A A' B B' p f → coe 0 1 i.(p i) f)
       (f : Π(_ : A) → B)
   → Π(_ : A') → B';
 
-coe-pi-test
+let app-to-zero = (λ A x y p → p 0)
+  : Π (A : Set) (x y : A) (p : pathp i.A x y) → A;
+
+let app-to-one = (λ A x y p → p 1)
+  : Π (A : Set) (x y : A) (p : pathp i.A x y) → A;
+
+let fun-with-pairs
+  = (λ A P w w' pf →
+    pair (λ i → fst (pf i))
+         (λ i → com<i> 0 1 j.(P (fst (pf j)))
+                  j.(coe 0 j i.(P (fst (pf i))) (snd w))
+                  j.(snd (pf j)) (snd w)))
+  : ∀ (A : Set) (P : Π(x : A) → Set)
+      (w w' : Σ(x : A) * P x) (pf : pathp i.(Σ(x : A) * P x) w w')
+  → Σ (p : pathp i.A (fst w) (fst w'))
+    * pathp i.(P (fst w')) (coe 0 1 i.(P (p i)) (snd w)) (snd w');
+
+pathp-to-coe-path
 
